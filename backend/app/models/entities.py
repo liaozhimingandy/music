@@ -56,6 +56,7 @@ class SongRecord:
     source_prompt: str | None = None  # 用户最初输入，五个阶段共用
     input_fingerprint: str | None = None  # 请求指纹；幂等去重依据，不返回给前端
     client_key: str | None = None         # 客户端 IP 哈希；单客户端限流依据，不返回给前端
+    recovery_attempts: int = 0            # 重启后重新入队的次数；任务成功后清零
     created_at: str = ""
     updated_at: str = ""
 
@@ -69,6 +70,8 @@ class SongRecord:
         raw = dict(row)
         raw["instrumental"] = _bool(raw.get("instrumental"))
         raw["metadata"] = json.loads(raw.pop("metadata_json", None) or "{}")
+        # 极老的库 / 手工构造的行可能没有恢复计数字段，按 0 兜底。
+        raw.setdefault("recovery_attempts", 0)
         return cls(**raw)
 
     def to_row(self) -> dict[str, Any]:

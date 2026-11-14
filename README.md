@@ -59,6 +59,7 @@ backend/.venv/Scripts/uvicorn app.main:app --app-dir backend --host 0.0.0.0 --po
 - `POST /v1/llm` 仅服务「AI 扩写描述」等用户主动点击的辅助按钮，不在生成主链路里（后端流程已经包含 LLM 步骤，前端重复调用只会白耗配额）。
 - 音乐模型 ID 由后端 `MUSIC_MODEL`（`backend/app/config.py`）唯一决定，默认 `ACE-Step/acestep-v15-xl-sft`；可用 `GET /v1/health` 的 `music_model` 查询。前端不维护模型枚举，提交时也不传 `model_variant`。
 - 描述为空 / 全空格时生成按钮禁用，服务端另以 `422` 兜底。
+- **后台队列是持久化的**：任务状态存 SQLite，后端重启 / `--reload` 后会自动扫描 `queued` / `processing` 的作品重新入队，已落盘的阶段产物直接跳过重跑；只有接口限流（429/413/422）、幂等去重或真实异常（终态 `failed`）才不会继续。默认巡检 3 秒、同一任务最多连续恢复 5 次，详见 [接口清单](./docs/api.md) 第二章。
 
 ## GitHub Pages 部署
 

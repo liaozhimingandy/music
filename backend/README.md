@@ -3,13 +3,13 @@
 FastAPI + SQLite3 的 AI 音乐创作后端。把一段创作灵感经过五个阶段变成可播放的歌曲：
 `策划 → 歌词 → 润色 → 音乐制作方案 → 音频生成`。LLM 走 OpenAI 兼容端点，音频走 ModelScope ACE-Step 异步推理。
 
-**全链路异步**：路由 / service / DAL 的 IO 方法都是 `async def`；数据库用 `aiosqlite`，HTTP 用 `httpx.AsyncClient`，文件 IO 用 `asyncio.to_thread`，后台生成任务用 `asyncio.Task` + `Semaphore`。等待云端生成时 event loop 仍可正常响应前端轮询。
+**全链路异步**：路由 / service / DAL 的 IO 方法都是 `async def`；数据库用 `aiosqlite`，HTTP 用 `httpx.AsyncClient`，文件 IO 用 `asyncio.to_thread`，后台生成任务用 `asyncio.Task` + `Semaphore`。等待云端生成时 event loop 仍可正常响应前端轮询。**任务状态以 SQLite 为持久化队列**，进程重启后自动恢复未完成作品，见下文「持久化队列」。
 
 ## 分层
 
 ```text
 backend/app/
-├── main.py            # FastAPI 入口（async lifespan 建表/清理、CORS、路由）
+├── main.py            # FastAPI 入口（async lifespan 建表/恢复队列/清理、CORS、路由）
 ├── config.py          # pydantic-settings 配置（密钥只在 .env）
 ├── constants.py       # 阶段名、产物名、状态码、API 版本前缀 /v1
 ├── ids.py             # 全局 UUIDv7 生成器（时间有序、同毫秒单调递增）
@@ -19,7 +19,7 @@ backend/app/
 │   ├── __init__.py    # api_v1 = APIRouter(prefix=API_V1_PREFIX)，一次注册全部子路由
 │   ├── history.py  generations.py  llm.py  meta.py（只写不带版本号的相对路径）
 ├── services/          # 业务层（不反向依赖 routers）
-│   ├── runtime.py            # 单例装配 + asyncio.Task/Semaphore 调度
+│   ├── runtime.py            # 单例装配 + 持久化队列 worker + asyncio.Task/Semaphore 调度
 │   ├── song_service.py       # 作品 CRUD / 响应映射 / 幂等去重 / 并发闸门
 │   ├── llm_service.py        # 扩写、写词、起标题
 │   ├── workflow_service.py   # 五阶段编排 + 进度落库 + 断点续跑
@@ -55,7 +55,7 @@ backend/app/
 5. `services/stage_steps.py` —— 五个 async 阶段函数，是「一首歌怎么被写出来」的核心。
 6. `services/workflow_service.py` —— 串起五阶段、写进度、断点续跑。
 7. `services/song_service.py` —— 前端字段的唯一映射点（`musical_key → key`）、幂等去重与活跃任务闸门。
-8. `services/runtime.py` + `routers/` + `main.py` —— 依赖注入组装点、对外接口与应用生命周期。
+8. `services/runtime.py` + `routers/` + `main.py` —— 依赖注入组装点、持久化队列、对外接口与应用生命周期。
 
 常见改动的落点：
 
@@ -79,8 +79,9 @@ backend/app/
 
 | 关注点 | 实现 |
 | --- | --- |
-| 后台生成任务 | `runtime.submit_job()` 用 `asyncio.create_task`，`_tasks` 持有强引用，`Semaphore` 限并发 |
-| 应用关闭 | `runtime.shutdown()` 取消任务（写 failed）→ 释放两个服务的 httpx 连接池 → `close_connection()` 关库 |
+| 后台生成任务 | `runtime.submit_job()` 用 `asyncio.create_task`，`_tasks` 持强引用、`_running` 按 song_id 去重，Semaphore 限并发 |
+| 队列持久化 | `songs` 表的 `queued/processing` 行即待办任务；`start_queue_worker()` 启动立即恢复 + 周期巡检，`SongDAL.claim_recovery()` 原子认领 |
+| 应用关闭 | `runtime.shutdown()` 停巡检 → cancel 任务（**不改 DB 状态**，留待重启续跑）→ 释放 httpx 连接池 → `close_connection()` 关库 |
 | 数据库 | 单条 `aiosqlite` 长连接 + `asyncio.Lock` 事务锁；WAL 只在 `init_schema()` 设一次 |
 | 文件 IO | `ArtifactStore` 的读写都经 `asyncio.to_thread`，音频写盘不阻塞 event loop |
 | 网络 IO | `httpx.AsyncClient`；轮询等待用 `asyncio.sleep`，下载用 `aiter_bytes()` |
@@ -88,6 +89,17 @@ backend/app/
 > 历史坑：早期「每操作一连接 + 每次重设 WAL」在 Windows 并发读写时会抛
 > `attempt to write a readonly database`（稳定复现在第三阶段）。改为长连接后消失，
 > 详见 `dal/database.py` 模块说明，切勿改回。
+
+## 持久化队列（重启不丢任务）
+
+`songs.status IN ('queued','processing')` 就是队列，`asyncio.Task` 只是执行载体：
+
+1. `POST /v1/generations` 先落库，再 `submit_job()` 交给后台任务；
+2. 应用启动 `init_schema()` 后调用 `start_queue_worker()`，**立即**扫描未完成记录重新入队，之后每 `MUSIC_STUDIO_QUEUE_POLL_SECONDS`（默认 3 秒）巡检一次；
+3. 关闭时只 cancel 内存任务，**不写 failed**，下次启动继续。阶段产物 JSON 已存在就跳过重跑，音乐阶段复用 `music_task.json` 的远端 `task_id`，不重复计费；
+4. 不会继续的情况：接口限制（413 / 422 / 429 / 幂等，请求未落库）、真实异常（`WorkflowService` 写 `failed` 终态）、同一任务连续中断超过 `MUSIC_STUDIO_MAX_RECOVERY_ATTEMPTS`（默认 5，任务成功后清零）。
+
+`SongDAL.claim_recovery()` 用带状态与次数条件的 `UPDATE ... recovery_attempts + 1` 原子认领，配合 `runtime._running` 防止重复入队。当前实现面向**单进程 uvicorn**；多 worker 需额外引入行级租约或外部队列。
 
 ## 幂等与接口防护
 
@@ -132,14 +144,14 @@ MUSIC_STUDIO_MOCK=true
 backend/.venv/Scripts/python.exe backend/tests/smoke_test.py
 ```
 
-冒烟测试用临时数据库 + mock 模式，59 项断言（启用 DELETE 路由时为 64 项）覆盖：/v1 版本前缀与 CORS、旧路径下线、建表与旧库补列、UUIDv7 单调性、三个 LLM 任务、全异步五阶段推进、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 与空描述防护、MUSIC_MODEL 配置兜底、并发闸门顺序、500 响应的 CORS 头、音频下载、级联删除与前端字段契约。
+冒烟测试用临时数据库 + mock 模式，71 项断言（启用 DELETE 路由时为 76 项）覆盖：/v1 版本前缀与 CORS、旧路径下线、建表与旧库补列、UUIDv7 单调性、三个 LLM 任务、全异步五阶段推进、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 与空描述防护、MUSIC_MODEL 配置兜底、并发闸门顺序、500 响应的 CORS 头、音频下载、级联删除、前端字段契约，以及**重启恢复队列**（遗留任务重新入队、运行中中断后状态保留与断点续跑、恢复次数超限、failed 终态不重跑）。
 
 ## 数据
 
 - 数据库：`<仓库根>/data/music_studio.db`（WAL，`/data/` 已忽略）
 - 阶段产物：`<仓库根>/data/outputs/<作品ID>/`（`stage1.json`、`stage2_polished.json`、`stage3.json`、`music/final_song.*`）
 - 阶段产物存在即跳过重跑；音乐生成另有参数指纹 + `task_id` 落盘，中断后可续跑或只补下载。
-- 旧库启动时自动补 `input_fingerprint` / `client_key` 两列与相关索引，历史数据不丢失。
+- 旧库启动时自动补 `input_fingerprint` / `client_key` / `recovery_attempts` 三列与相关索引，历史数据不丢失。
 
 ## 接口与配置
 

@@ -42,7 +42,7 @@ $EDITOR backend/app/.env     # 填入密钥
 
 > `.env` 已被 `.gitignore` 忽略，不要提交密钥。未配置 LLM Key 时，扩写/写词/起标题会返回本地兜底文本；未配置 `MUSIC_API_TOKEN` 时音频生成会自动切到离线 mock。
 >
-> `pip install -e backend` 会一并装好 `aiosqlite`（异步 SQLite 驱动）、`httpx`、`Jinja2` 等 8 个轻量依赖，不需要 torch / CUDA / 本地模型权重。后端全链路异步，单进程 uvicorn 即可并发处理轮询与后台生成任务。
+> `pip install -e backend` 会一并装好 `aiosqlite`（异步 SQLite 驱动）、`httpx`、`Jinja2` 等 8 个轻量依赖，不需要 torch / CUDA / 本地模型权重。后端全链路异步，**请用单进程 uvicorn 启动**（队列 worker 在进程内去重）。生成任务状态存 SQLite，重启后自动恢复，详见 [接口清单](./api.md) 第二章。
 
 ## 启动
 
@@ -76,13 +76,14 @@ backend/.venv/Scripts/python.exe backend/tests/smoke_test.py   # Windows
 # backend/.venv/bin/python backend/tests/smoke_test.py         # macOS / Linux
 ```
 
-该测试使用临时数据库 + mock 模式，59 项断言（启用 DELETE 路由时为 64 项）覆盖 /v1 版本前缀与 CORS、建表与旧库补列、UUIDv7 单调性、LLM 三任务、全异步五阶段、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 与空描述防护、MUSIC_MODEL 配置兜底、音频下载与级联删除。
+该测试使用临时数据库 + mock 模式，71 项断言（启用 DELETE 路由时为 76 项）覆盖 /v1 版本前缀与 CORS、建表与旧库补列、UUIDv7 单调性、LLM 三任务、全异步五阶段、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 与空描述防护、MUSIC_MODEL 配置兜底、音频下载、级联删除，以及**进程重启后的队列恢复**（含执行中任务被中断后的断点续跑、恢复次数超限与 `failed` 终态）。
 
 ## 数据与重置
 
 - 数据库：`data/music_studio.db`
 - 阶段产物与音频：`data/outputs/<作品ID>/`
 - 重置全部数据：停止服务后删除 `data/` 目录即可，下次启动自动重建。
+- **重启无需手工干预**：未完成的 `queued` / `processing` 作品在启动时会重新入队；想让某条任务不再恢复，把它的 `status` 改成 `failed`，或直接删除该作品。配置项 `MUSIC_STUDIO_QUEUE_POLL_SECONDS`（默认 3）与 `MUSIC_STUDIO_MAX_RECOVERY_ATTEMPTS`（默认 5）见 `backend/app/.env.example`。
 
 ## 常见问题
 
@@ -94,6 +95,7 @@ backend/.venv/Scripts/python.exe backend/tests/smoke_test.py   # Windows
 | 重复点「开始生成」产生了两条 | 正常应命中幂等去重（响应带 `X-Deduplicated: true`）；确实要再生成一次可加 `?force=true` |
 | 创建作品后一直「生成中」 | 查看后端日志；`GET /v1/generations/{id}/stages` 可看卡在哪个阶段 |
 | 状态变「生成失败」 | 读 `error_message`；常见原因是密钥无效、网络超时、模型返回非 JSON |
-| 想中断后继续 | `data/outputs/<id>/` 下的阶段 JSON 会跳过重跑；音乐任务 `music_task.json` 保存了 `task_id` |
+| 想中断后继续 | 现在会自动继续：重启后端后队列 worker 扫描未完成作品重新入队；`data/outputs/<id>/` 下的阶段 JSON 跳过重跑，音乐任务复用 `music_task.json` 里的 `task_id` 不重复计费 |
+| 重启后任务一直卡「生成中」 | 看后端日志是否有阶段异常；连续中断超过 `MUSIC_STUDIO_MAX_RECOVERY_ATTEMPTS` 会被标为 `failed` 并写明原因，可重新提交生成 |
 | 端口冲突 | 改 `ACE_STEP_PORT`，或前端开发服务器加 `--port 5177` |
 | Pages 线上页面无法生成 | 纯静态托管没有后端，页面按设计进入演示模式 |

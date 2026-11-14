@@ -26,7 +26,7 @@
 | 1 | GET | `/v1/health` | 否 | 健康检查，返回应用名、运行模式、数据库路径与当前 `music_model`（不限流） |
 | 2 | GET | `/v1/history?limit=25` | 是 | 作品列表，前端每 2 秒轮询；也是后端在线探测依据 |
 | 3 | POST | `/v1/llm` | 仅辅助按钮 | 描述扩写 / 写词 / 起标题；**「开始生成」主链路不调用它**，后端五阶段已包含这些 LLM 步骤 |
-| 4 | POST | `/v1/generations` | 是 | 创建作品，**立即返回 `queued`**，后台 asyncio 任务跑五阶段 |
+| 4 | POST | `/v1/generations` | 是 | 创建作品，**立即返回 `queued`**，任务落入 SQLite 持久化队列，后台跑五阶段（重启可恢复） |
 | 5 | GET | `/v1/generations/{id}` | 否（预留） | 作品详情 + 五阶段进度 |
 | 6 | GET | `/v1/generations/{id}/stages` | 否（预留） | 只看阶段进度 |
 | 7 | GET | `/v1/generations/{id}/audio` | 是（`audio_url`） | 音频二进制流 |
@@ -34,20 +34,30 @@
 
 > 后端未启动时前端自动进入**演示模式**（`services/demo.ts` 内存数据），界面与生成流程仍可预览。
 
-## 二、生成任务的异步模型
+## 二、生成任务的异步模型（持久化队列）
+
+**数据库就是队列**：`songs` 表里 `status IN ('queued', 'processing')` 的每一行都是一个待办任务；`asyncio.Task` 只是本进程的执行载体，重启后由队列 worker 依据 DB 重建。
 
 ```
-POST /v1/generations  ──> 幂等查重 ──> 活跃任务闸门 ──> 写 songs(queued) + 预置 song_stages ──> 立即返回
-                                                              │
-                                                              └─ asyncio.create_task（Semaphore 限并发）
-                                                                 planning → lyrics → polish → music → music_generation
-                                                                 每阶段：start → 落盘 JSON → complete → 更新 current_stage
-                                                                 全部完成：status=ready + audio_path + title/lyrics/style_prompt
+POST /v1/generations ─ 幂等查重 ─ 活跃任务闸门 ─ 写 songs(queued) + 预置 song_stages ─ 立即返回
+                                                        │
+                         ┌──────────────────────────────┴──────────────────────────────┐
+                         ▼                                                             ▼
+                 submit_job（本次请求）                         应用启动 / 队列巡检（重启后）
+                         └──────────────────────────────┬──────────────────────────────┘
+                                                        ▼
+                         asyncio.Task + Semaphore（上限 MUSIC_STUDIO_MAX_ACTIVE_JOBS）
+                         planning → lyrics → polish → music → music_generation
+                         每阶段：start → 原子落盘 JSON → complete → 更新 current_stage
+                         全部完成：status=ready + audio_path + 清零 recovery_attempts
 ```
 
-- 后台任务由 `services/runtime.py` 用 `asyncio.Task` + `asyncio.Semaphore` 调度（不再是线程池），上限 `MUSIC_STUDIO_MAX_ACTIVE_JOBS`。
+- **启动恢复**：`main.py` 的 lifespan 在 `init_schema()` 后调用 `runtime.start_queue_worker()`，立刻扫描一次未完成任务重新入队；之后每 `MUSIC_STUDIO_QUEUE_POLL_SECONDS`（默认 3 秒）巡检一次，兜住任务崩溃 / 提交失败。`SongDAL.claim_recovery` 用带条件的 UPDATE 原子认领（`recovery_attempts + 1`），`runtime._running` 按 song_id 去重，不会重复跑同一首歌。
+- **关闭不丢任务**：`shutdown()` 只 cancel 内存中的 task，**不改数据库状态**；被中断的任务仍是 `queued/processing`，下次启动继续。已落盘的阶段 JSON 直接跳过重跑，音乐阶段复用 `music_task.json` 里的远端 `task_id`，不重复计费。
+- **只有两类情况不会继续**：① 接口层限制（413 / 422 / 429 / 幂等去重）——请求根本没落库；② 真实异常——`WorkflowService` 把作品置为 `failed` 终态（含 `error_message`），或同一任务连续中断超过 `MUSIC_STUDIO_MAX_RECOVERY_ATTEMPTS`（默认 5）被标记停止恢复，避免无限重跑消耗额度。任务正常完成后恢复计数清零，因此长期任务多次重启不会误触上限。
 - 数据库走 `aiosqlite` 单条长连接 + 事务锁，文件 IO 走 `asyncio.to_thread`，HTTP 走 `httpx.AsyncClient`。等待 LLM / 远端音乐生成的几分钟里，event loop 仍能正常响应前端轮询。
-- 应用关闭时依次取消未完成后台任务（写为 `failed`）→ 释放 httpx 连接池 → 关闭数据库连接。
+- 关闭顺序：停巡检 → cancel 任务（保留 DB 状态）→ 释放 httpx 连接池 → 关闭数据库连接。
+- **单进程约束**：队列 worker 与 `_running` 去重都在本进程内，请用单 worker 启动 uvicorn；需要多进程 / 多机部署时要额外引入行级租约或外部队列（Celery / Redis / 数据库 advisory lock）。
 
 前端只轮询 `GET /v1/history`，用 `status` 判断进度：
 
@@ -267,10 +277,17 @@ X-Deduplicated: true
 | `MUSIC_STUDIO_MAX_REQUEST_BYTES` | `65536` | 请求体上限（字节） |
 | `MUSIC_STUDIO_TRUST_PROXY` | `false` | 是否信任 `X-Forwarded-For`（仅可信反代后开启） |
 
+持久化队列配置：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `MUSIC_STUDIO_QUEUE_POLL_SECONDS` | `3` | 队列巡检间隔（秒）；启动时还会立即额外扫描一次 |
+| `MUSIC_STUDIO_MAX_RECOVERY_ATTEMPTS` | `5` | 同一任务连续中断后最多自动恢复几次，`0` 表示禁用；任务正常完成后清零 |
+
 ## 八、验证
 
 ```bash
-# 离线端到端冒烟：/v1 前缀 / CORS / 建表 / UUIDv7 / LLM / 五阶段 / 幂等 / 413-422-429 / 空描述 / 模型兜底 / 音频 / 级联删除（59 项；启用 DELETE 路由时 64 项）
+# 离线端到端冒烟：/v1 前缀 / CORS / 建表 / UUIDv7 / LLM / 五阶段 / 幂等 / 413-422-429 / 空描述 / 模型兜底 / 音频 / 级联删除 / 重启恢复队列（71 项；启用 DELETE 路由时 76 项）
 backend/.venv/Scripts/python.exe backend/tests/smoke_test.py
 
 # 启动真实服务

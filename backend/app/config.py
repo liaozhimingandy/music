@@ -122,6 +122,17 @@ class Settings(BaseSettings):
     # 默认不信任 X-Forwarded-For（可伪造）；只有部署在可信反向代理后才开启。
     trust_proxy_headers: bool = Field(default=False, validation_alias="MUSIC_STUDIO_TRUST_PROXY")
 
+    # 持久化任务队列：任务状态存 SQLite，进程重启后由 worker 扫描恢复。
+    # queue_poll_seconds 是巡检间隔（启动时会立刻额外扫一次）；
+    # max_recovery_attempts 限制同一个任务被恢复的次数，0 表示禁用自动恢复，
+    # 防止反复崩溃的任务无限重跑消耗 LLM / 音乐生成额度。
+    queue_poll_seconds: float = Field(
+        default=3.0, ge=0.5, validation_alias="MUSIC_STUDIO_QUEUE_POLL_SECONDS"
+    )
+    max_recovery_attempts: int = Field(
+        default=5, ge=0, validation_alias="MUSIC_STUDIO_MAX_RECOVERY_ATTEMPTS"
+    )
+
     @property
     def db_path(self) -> Path:
         """SQLite 数据库文件路径：``<data_dir>/music_studio.db``。"""

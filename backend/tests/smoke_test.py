@@ -2,12 +2,16 @@
 
 运行：``backend/.venv/Scripts/python.exe backend/tests/smoke_test.py``
 覆盖：建表与旧库补列 → UUIDv7 → /v1 版本前缀 → 全异步五阶段 → 幂等去重
-→ 接口防护（413 / 422 / 429，含空描述）→ 模型配置兜底 → 音频 → 级联删除。
+→ 接口防护（413 / 422 / 429，含空描述）→ 模型配置兜底 → 音频 → 级联删除
+→ 重启恢复持久化队列（含运行中中断的断点续跑 / 次数超限 / failed 终态）。
 
 实现要点：环境变量必须在 ``import app`` **之前**设置，因为 Settings 在模块
 导入时就实例化；数据目录指向 tests/.tmp（已被 .gitignore 忽略），每次运行
 先清空，保证结果可复现、不污染真实作品库。测试里刻意把限流阈值放宽，
 只在第 8 步临时调严来断言 429。
+
+队列测试把巡检间隔设成 60 秒，让「启动立即恢复」成为唯一恢复路径，
+从而能确定性地模拟一次进程重启（第 11 步用新 TestClient 触发新 lifespan）。
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ os.environ["MUSIC_STUDIO_RATE_LIMIT_CREATE"] = "100"
 os.environ["MUSIC_STUDIO_MAX_ACTIVE_JOBS"] = "20"
 os.environ["MUSIC_STUDIO_MAX_ACTIVE_PER_CLIENT"] = "20"
 os.environ["MUSIC_STUDIO_DEDUPE_WINDOW"] = "300"        # 测试期间始终处于去重窗口
+os.environ["MUSIC_STUDIO_QUEUE_POLL_SECONDS"] = "60"    # 关闭周期巡检干扰，只测启动恢复
+os.environ["MUSIC_STUDIO_MAX_RECOVERY_ATTEMPTS"] = "3"  # 供「次数超限」断言
 shutil.rmtree(TMP, ignore_errors=True)
 TMP.mkdir(parents=True, exist_ok=True)
 
@@ -40,8 +46,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import deps  # noqa: E402
 from app.config import settings  # noqa: E402
+from app.constants import STAGE_ORDER, STAGE_OUTPUTS, USER_INPUT_FILE  # noqa: E402
+from app.dal import utc_now  # noqa: E402
 from app.ids import is_song_id, new_song_id, uuid7  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models import SONG_TABLE_MIGRATIONS  # noqa: E402
 from app.services.runtime import get_song_service  # noqa: E402
 
 # 前端 interface/index.ts 里 GenerationResponse 的字段白名单；
@@ -125,7 +134,19 @@ def main() -> None:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             columns = {row[1] for row in conn.execute("PRAGMA table_info(songs)")}
         check({"songs", "song_stages"} <= tables, "SQLite 建出 songs / song_stages 两张表")
-        check({"input_fingerprint", "client_key"} <= columns, "去重/限流字段已建（含旧库补列逻辑）")
+        check(
+            {"input_fingerprint", "client_key", "recovery_attempts"} <= columns,
+            "去重 / 限流 / 队列恢复计数字段已建（含旧库补列逻辑）",
+        )
+        with sqlite3.connect(":memory:") as migration_db:
+            migration_db.execute("CREATE TABLE songs (id TEXT PRIMARY KEY, created_at TEXT)")
+            for column, declaration in SONG_TABLE_MIGRATIONS.items():
+                migration_db.execute(f"ALTER TABLE songs ADD COLUMN {column} {declaration}")
+            migrated = {row[1] for row in migration_db.execute("PRAGMA table_info(songs)")}
+        check(
+            {"input_fingerprint", "client_key", "recovery_attempts"} <= migrated,
+            "旧库补列 DDL 可执行（含 NOT NULL DEFAULT 0 的恢复计数列）",
+        )
 
         # --- 2. UUIDv7 ---
         print("2) UUIDv7 生成规则")
@@ -275,7 +296,136 @@ def main() -> None:
     app.dependency_overrides.clear()
     logging.getLogger("app.middleware").disabled = False
 
-    print("\n全部通过：全异步链路 + 依赖注入 + UUIDv7 + 幂等去重 + 接口防护 + /v1 与跨域。")
+    # --- 11. 持久化队列：模拟进程被 kill 后重启 ---
+    # 直接写 DB + 产物目录，绕过所有 HTTP 接口，等价于「上一个进程遗留的任务」。
+    print("11) 重启恢复（数据库即队列）")
+    legacy_id = new_song_id()
+    exhausted_id = new_song_id()
+    failed_id = new_song_id()
+    now = utc_now()
+    seed_text = "重启恢复测试：夏末站台的民谣"
+    for song_id, attempts, status in (
+        (legacy_id, 2, "queued"),      # 中断过 2 次，还剩 1 次恢复机会
+        (exhausted_id, 3, "queued"),   # 已达上限，应停止自动恢复
+        (failed_id, 0, "failed"),      # 终态，不应入队
+    ):
+        task_dir = settings.outputs_dir / song_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / USER_INPUT_FILE).write_text(seed_text, encoding="utf-8")
+        with sqlite3.connect(str(settings.db_path)) as conn:
+            conn.execute(
+                "INSERT INTO songs (id, title, task_type, mode, model_variant, status, prompt, "
+                "source_prompt, instrumental, metadata_json, recovery_attempts, created_at, updated_at) "
+                "VALUES (?, ?, 'text2music', 'simple', ?, ?, ?, ?, 0, '{}', ?, ?, ?)",
+                (song_id, "待恢复作品", settings.music_model, status, seed_text, seed_text, attempts, now, now),
+            )
+            for stage in STAGE_ORDER:
+                conn.execute(
+                    "INSERT INTO song_stages (song_id, stage, status, output_file) VALUES (?, ?, 'pending', ?)",
+                    (song_id, stage, STAGE_OUTPUTS[stage]),
+                )
+            conn.commit()
+
+    # 新的 TestClient = 新的 async lifespan = 模拟一次全新的后端进程。
+    with TestClient(app) as restarted:
+        detail = wait_ready(restarted, legacy_id, timeout=30)
+        check(
+            detail.get("status") == "ready",
+            f"重启后遗留任务自动恢复并跑完五阶段（{detail.get('error_message')}）",
+        )
+        stages = detail.get("stages", [])
+        check(
+            len(stages) == 5 and all(item["status"] == "completed" for item in stages),
+            "恢复任务的五个阶段全部 completed",
+        )
+        check(
+            restarted.get(f"/v1/generations/{legacy_id}/audio").status_code == 200,
+            "恢复生成的音频可下载",
+        )
+        with sqlite3.connect(str(settings.db_path)) as conn:
+            attempts = conn.execute(
+                "SELECT recovery_attempts FROM songs WHERE id = ?", (legacy_id,)
+            ).fetchone()[0]
+            exhausted = conn.execute(
+                "SELECT status, error_message FROM songs WHERE id = ?", (exhausted_id,)
+            ).fetchone()
+            failed = conn.execute("SELECT status FROM songs WHERE id = ?", (failed_id,)).fetchone()
+        check(attempts == 0, "任务正常跑完后连续中断计数清零")
+        check(
+            exhausted[0] == "failed" and "停止自动恢复" in (exhausted[1] or ""),
+            "超过最大恢复次数的任务被停止并写明原因",
+        )
+        check(failed[0] == "failed", "failed 是终态，不会被重新入队")
+
+    # --- 12. 执行到一半被 kill：状态保留 + 阶段产物断点续跑 ---
+    print("12) 运行中中断与断点续跑")
+    import asyncio  # noqa: PLC0415 - 仅本步骤需要
+
+    from app.services import runtime  # noqa: E402, PLC0415
+    from app.services.workflow_service import WorkflowService  # noqa: E402, PLC0415
+
+    class SlowProvider:
+        """阶段 5 故意挂起，模拟远端音频生成时进程被强制关闭。"""
+
+        @staticmethod
+        async def generate(**kwargs):  # noqa: ARG004
+            await asyncio.sleep(30)
+            return {}
+
+    # 注入带「慢音频生成」的编排器；shutdown 会清掉单例，下次启动自动恢复默认 mock。
+    runtime._workflow_service = WorkflowService(provider=SlowProvider())
+    with TestClient(app) as interrupted:
+        response = interrupted.post(
+            "/v1/generations",
+            json={
+                "task_type": "text2music",
+                "mode": "simple",
+                "inputs": {"prompt": "中断续跑测试：雨夜的城市", "instrumental": False},
+            },
+        )
+        check(response.status_code == 200, "模拟中断用的新任务提交成功")
+        slow_id = response.json()["id"]
+        task_dir = settings.outputs_dir / slow_id
+        deadline = time.monotonic() + 20
+        while not (task_dir / STAGE_OUTPUTS["music"]).is_file():
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        check(
+            (task_dir / STAGE_OUTPUTS["planning"]).is_file()
+            and (task_dir / STAGE_OUTPUTS["music"]).is_file(),
+            "中断前前四阶段产物已落盘，卡在第五阶段",
+        )
+        with sqlite3.connect(str(settings.db_path)) as conn:
+            before_started = conn.execute(
+                "SELECT started_at FROM song_stages WHERE song_id = ? AND stage = 'planning'", (slow_id,)
+            ).fetchone()[0]
+    # with 退出即 shutdown()：只 cancel 内存 task，不能把作品写成 failed。
+    with sqlite3.connect(str(settings.db_path)) as conn:
+        interrupted_status = conn.execute(
+            "SELECT status FROM songs WHERE id = ?", (slow_id,)
+        ).fetchone()[0]
+    check(
+        interrupted_status in ("queued", "processing"),
+        "应用关闭时保留未完成任务状态（不再误标 failed）",
+    )
+
+    with TestClient(app) as resumed:
+        detail = wait_ready(resumed, slow_id, timeout=30)
+        check(
+            detail.get("status") == "ready",
+            f"重启后从断点继续并生成音频（{detail.get('error_message')}）",
+        )
+        with sqlite3.connect(str(settings.db_path)) as conn:
+            after_started = conn.execute(
+                "SELECT started_at FROM song_stages WHERE song_id = ? AND stage = 'planning'", (slow_id,)
+            ).fetchone()[0]
+        check(
+            before_started is not None and after_started == before_started,
+            "已落盘的前四阶段未重复执行（阶段开始时间未刷新）",
+        )
+
+    print("\n全部通过：全异步链路 + 依赖注入 + UUIDv7 + 幂等去重 + 接口防护 + /v1 与跨域 + 重启可恢复队列。")
 
 
 if __name__ == "__main__":

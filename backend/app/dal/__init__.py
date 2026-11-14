@@ -2,7 +2,7 @@
 
 四个模块的职责：
 * ``database``   异步长连接 / 事务锁 / 建表补列 / UTC 时间戳
-* ``song_dal``   songs 表 CRUD、去重与活跃任务计数
+* ``song_dal``   songs 表 CRUD、去重与活跃任务计数、持久化队列扫描与认领
 * ``stage_dal``  song_stages 表进度读写
 * ``artifact_dal`` 阶段 JSON 与音频文件的存取（断点续跑依据）
 

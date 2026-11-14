@@ -11,11 +11,13 @@
 * 作品状态只用前端认识的 ``queued / processing / ready / failed``；阶段状态
   用 ``pending / running / completed / failed``，两套枚举见 constants.py。
 
-去重与限流字段
+去重与队列字段
 --------------
 ``input_fingerprint`` 是请求内容的 sha256（或客户端 Idempotency-Key 的哈希），
 用于幂等去重；``client_key`` 是客户端 IP 的哈希，用于单客户端活跃任务上限。
-两者都是后加的列，故额外提供 ``SONG_TABLE_MIGRATIONS`` 让旧库平滑升级
+``recovery_attempts`` 记录一个任务被「重启后重新入队」的累计次数，防止
+反复崩溃的任务无限重跑消耗 LLM / 音乐生成额度；任务正常完成后清零。
+后三列都是后加的，故额外提供 ``SONG_TABLE_MIGRATIONS`` 让旧库平滑升级
 （``CREATE TABLE IF NOT EXISTS`` 不会改已有表）；依赖这两列的索引放在
 ``POST_MIGRATION_SQL``，必须等 ALTER 完成后再建，否则旧库启动会失败。
 
@@ -61,6 +63,7 @@ CREATE TABLE IF NOT EXISTS songs (
     source_prompt     TEXT,
     input_fingerprint TEXT,           -- 请求指纹，幂等去重依据
     client_key        TEXT,           -- 客户端标识哈希，单客户端限流依据
+    recovery_attempts INTEGER NOT NULL DEFAULT 0,  -- 重启恢复次数（成功后清零）
     created_at        TEXT    NOT NULL,
     updated_at        TEXT    NOT NULL
 );
@@ -88,12 +91,15 @@ CREATE INDEX IF NOT EXISTS idx_stages_song ON song_stages(song_id);
 SONG_TABLE_MIGRATIONS: dict[str, str] = {
     "input_fingerprint": "TEXT",
     "client_key": "TEXT",
+    # SQLite 允许 ADD COLUMN 带 NOT NULL DEFAULT，旧行会自动填 0。
+    "recovery_attempts": "INTEGER NOT NULL DEFAULT 0",
 }
 
 # 依赖新列的索引必须在 ALTER 之后创建，否则旧库（尚无该列）会在启动时报错。
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_songs_fingerprint ON songs(input_fingerprint, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_songs_client ON songs(client_key, status);
+CREATE INDEX IF NOT EXISTS idx_songs_queue ON songs(status, created_at ASC);
 """
 
 # DAL 插入 / 更新时使用的列白名单，顺序与 DDL 保持一致。
@@ -131,6 +137,8 @@ SONG_COLUMNS: tuple[str, ...] = (
     # --- 幂等与接口防护 ---
     "input_fingerprint",  # 请求内容 sha256 / Idempotency-Key 哈希
     "client_key",         # 客户端 IP 哈希（不存明文）
+    # --- 持久化队列 ---
+    "recovery_attempts",  # 重启恢复次数；任务成功完成后清零
     # --- 时间戳（ISO 8601 UTC 字符串）---
     "created_at",
     "updated_at",

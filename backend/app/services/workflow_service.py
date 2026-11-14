@@ -8,7 +8,9 @@
 前端每 2 秒轮询 /v1/history 即可刷新状态与进度。
 
 续跑约定：阶段产物 JSON 存在即视为该阶段已完成（``_execute`` 直接复用），
-产物损坏则重新执行该阶段。因此清理 ``data/outputs/<song_id>/`` 会触发重跑。
+产物损坏则重新执行该阶段。进程重启后由 ``runtime`` 的队列 worker 扫描
+``queued/processing`` 记录重新入队，本服务便从这里继续；因此清理
+``data/outputs/<song_id>/`` 会触发重跑，而保留目录则跳过已完成阶段。
 
 所有数据库与文件访问都 ``await``，等待 LLM / 远端音乐生成期间不会阻塞
 event loop；同一时刻能跑几个作品由 runtime 的 asyncio.Semaphore 控制。

@@ -2,7 +2,9 @@
 
 依赖方向：``routers -> services -> dal -> models``；service 不反向依赖 routers。
 全链路异步：路由 / service / DAL 的 IO 方法均为 ``async def``，后台生成任务
-由 ``runtime`` 用 asyncio.Task + Semaphore 调度，不再使用线程池。
+由 ``runtime`` 用 asyncio.Task + Semaphore 调度，不再使用线程池。任务状态以
+SQLite 为准，``runtime`` 的队列 worker 在启动与巡检时恢复未完成任务，
+因此进程重启不会丢队列（详见 runtime.py 模块说明）。
 
 模块速查（建议按此顺序阅读）：
 * ``prompt_manager``  只读加载 / 渲染 prompts 模板（async）
@@ -13,7 +15,7 @@
 * ``song_service``    作品 CRUD、前端响应映射、幂等去重（async）
 * ``llm_service``     /v1/llm 三个轻量任务（async）
 * ``rate_limiter``    进程内滑动窗口限流（async），供 deps.py 调用
-* ``runtime``         单例装配点与生命周期（async），FastAPI Depends 从这里取服务
+* ``runtime``         单例装配点 + 持久化队列 worker + 生命周期（async），FastAPI Depends 从这里取服务
 * ``cover_theme``     由 ID 推导封面配色（纯函数，同步）
 
 横切模块：``app/ids.py`` 提供全局 UUIDv7 ID，``app/deps.py`` 是 FastAPI

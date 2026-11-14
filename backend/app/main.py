@@ -4,14 +4,17 @@
 分层：``routers -> service -> dal -> model``（SQLite3）。
 
 应用生命周期（async lifespan）：
-* 启动：``await init_schema()`` 建表 / 补列（幂等）并打印数据库路径；
-* 关闭：``await runtime.shutdown()`` 取消后台 asyncio 任务、释放
-  httpx 连接池与 Service 单例。
+* 启动：``await init_schema()`` 建表 / 补列（幂等），随后
+  ``await runtime.start_queue_worker()`` 立即扫描 DB 里上次进程遗留的
+  queued/processing 任务重新入队，并挂上周期性巡检；
+* 关闭：先停巡检并 cancel 内存里的 task（**不改数据库状态**，任务留待
+  重启续跑），再释放 httpx 连接池与 Service 单例，最后关数据库连接。
 
 全链路异步：路由 -> service -> dal(aiosqlite) 均无阻塞 IO，等待 LLM /
 音乐生成时 event loop 仍可响应前端轮询。接口清单见 docs/api.md。
 所有接口统一挂在 ``/v1`` 版本前缀下（见 routers/__init__.py 的 api_v1）。
 跨域默认放行本机回环来源，且 500 等错误响应同样带 CORS 头（见 middleware.py）。
+生成任务以 SQLite 为持久化队列，进程重启不丢任务（见 services/runtime.py）。
 """
 
 from __future__ import annotations
@@ -36,11 +39,12 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001 - FastAPI 约定的签名
-    """启动建表、关闭清理；TestClient 进入 with 时也会走这里。"""
+    """启动建表、恢复队列、关闭清理；TestClient 进入 with 时也会走这里。"""
     await init_schema()
     logging.getLogger(__name__).info("SQLite 数据库就绪：%s", settings.db_path)
+    await runtime.start_queue_worker()
     yield
-    # 先取消后台任务（它们可能还要写一次 failed 状态），最后才关数据库连接。
+    # 先停巡检 / 取消后台任务（保留 DB 状态供下次重启续跑），最后才关连接。
     await runtime.shutdown()
     await close_connection()
 

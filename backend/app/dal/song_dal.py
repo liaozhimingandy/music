@@ -6,6 +6,14 @@
 除基本 CRUD 外还提供给接口防护用的三个查询：
 ``find_duplicate``（幂等去重）/ ``count_active``（全局并发上限）/
 ``count_active_by_client``（单客户端并发上限）。
+
+持久化队列
+----------
+``songs`` 表本身就是队列：``queued`` / ``processing`` 的行 = 待执行任务，
+``asyncio.Task`` 只是执行载体。``list_unfinished`` 供 worker 扫描，
+``claim_recovery`` 用一条带条件的 UPDATE 原子认领（同时递增恢复次数），
+``clear_recovery_attempts`` 在任务正常完成后把计数清零。
+这样进程重启、--reload、任务被 cancel 都不会丢任务。
 """
 
 from __future__ import annotations
@@ -13,7 +21,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..constants import STATUS_PROCESSING, STATUS_QUEUED
+from ..constants import STATUS_FAILED, STATUS_PROCESSING, STATUS_QUEUED
 from ..models import SONG_COLUMNS, SongRecord
 from .database import connection, utc_now
 
@@ -106,6 +114,67 @@ class SongDAL:
             row = await cursor.fetchone()
             await cursor.close()
         return int(row[0]) if row else 0
+
+    # ---------------- 持久化队列 ----------------
+
+    async def list_unfinished(self, limit: int = 200) -> list[SongRecord]:
+        """列出所有 ``queued`` / ``processing`` 的任务，按创建时间升序（FIFO）。
+
+        这是重启恢复的依据：DB 里的未完成行不会因为进程退出而消失。
+        ``ready`` / ``failed`` 是终态，不会进入队列；``recovery_attempts``
+        是否超限由 runtime 判断，这里只负责取数，保持 DAL 不含业务策略。
+        依赖 idx_songs_queue 索引。
+        """
+        async with connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM songs WHERE status IN (?, ?) ORDER BY created_at ASC LIMIT ?",
+                (STATUS_QUEUED, STATUS_PROCESSING, max(1, min(limit, 500))),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [SongRecord.from_row(row) for row in rows]
+
+    async def claim_recovery(self, song_id: str, max_attempts: int) -> bool:
+        """原子认领一个待恢复任务：重置成 queued、清旧错误、恢复次数 +1。
+
+        WHERE 里同时检查状态与次数上限，保证并发（或多进程）扫描时不会把
+        同一个任务认领两次；返回是否真的更新到行。重置 ``current_stage``
+        是为了让前端在重新排队期间不显示上一个进程留下的阶段进度。
+        """
+        async with connection() as conn:
+            cursor = await conn.execute(
+                "UPDATE songs SET status = ?, current_stage = NULL, error_message = NULL, "
+                "recovery_attempts = recovery_attempts + 1, updated_at = ? "
+                "WHERE id = ? AND status IN (?, ?) AND recovery_attempts < ?",
+                (STATUS_QUEUED, utc_now(), song_id, STATUS_QUEUED, STATUS_PROCESSING, max_attempts),
+            )
+            claimed = cursor.rowcount > 0
+            await cursor.close()
+        return claimed
+
+    async def mark_recovery_exhausted(self, song_id: str) -> None:
+        """恢复次数用尽：置为 failed 并写明原因，避免任务无限重试。"""
+        async with connection() as conn:
+            await conn.execute(
+                "UPDATE songs SET status = ?, current_stage = NULL, "
+                "error_message = ?, updated_at = ? "
+                "WHERE id = ? AND status IN (?, ?)",
+                (
+                    STATUS_FAILED,
+                    "任务多次中断且未完成，已停止自动恢复；请重新提交生成",
+                    utc_now(),
+                    song_id,
+                    STATUS_QUEUED,
+                    STATUS_PROCESSING,
+                ),
+            )
+
+    async def clear_recovery_attempts(self, song_id: str) -> None:
+        """任务正常跑完后清零恢复次数（只统计「连续中断」次数）。"""
+        async with connection() as conn:
+            await conn.execute(
+                "UPDATE songs SET recovery_attempts = 0 WHERE id = ?", (song_id,)
+            )
 
     async def update(self, song_id: str, **fields: Any) -> SongRecord | None:
         """局部更新字段，返回更新后的实体。
