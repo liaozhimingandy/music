@@ -79,6 +79,7 @@ function unwrap<T>(promise: Promise<unknown>): Promise<T> {
   return promise as Promise<T>;
 }
 
+/** 三个类型化快捷方法；options.silent 控制是否弹全局错误提示 */
 export function get<T>(url: string, options: RequestOptions = {}): Promise<T> {
   return unwrap<T>(instance.get(url, options));
 }

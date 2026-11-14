@@ -19,6 +19,7 @@ export const apiUrls = {
   llm: () => "/llm",
 };
 
+/** 探测结果三态：unknown 未探测 / online 真实接口 / offline 演示模式 */
 type BackendState = "unknown" | "online" | "offline";
 let backendState: BackendState = "unknown";
 let probePromise: Promise<boolean> | null = null;

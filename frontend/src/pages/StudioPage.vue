@@ -1,4 +1,20 @@
 <script setup lang="ts">
+/**
+ * 主工作台页面：三栏布局（简单创作 / 作品库 / 歌曲详情）+ 底部播放器。
+ *
+ * 本组件是全局状态中枢，子组件都是「受控组件」：只接收 props、通过 emit
+ * 把用户操作交回这里处理，不自己发请求。
+ *
+ * 数据流：services/api.ts（axios + 离线降级）-> history / pending 两个
+ * 响应式数组 -> 三栏组件；每 POLL_INTERVAL 轮询 /api/history 刷新生成状态。
+ *
+ * 播放：页面内唯一的 <audio ref="audioRef"> 由本组件持有，子组件只发
+ * playPause / seek / prev / next / volume 等事件，避免多处同时操作 audio。
+ * 播放器显隐与音量持久化在 localStorage（见两个 STORAGE_KEY）。
+ *
+ * 关键函数：handleCreate（四步简单创作流程）、switchTrack（切歌）、
+ * handleDelete / handleDownload / showLibrary。
+ */
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
 import { MusicIcon, ViewListIcon } from "tdesign-icons-vue-next";
@@ -36,6 +52,11 @@ function readStoredVolume(): number {
   }
 }
 
+/**
+ * 全局状态：backend 为后端连接状态；history 是作品库；pending 是「生成中」
+ * 的本地占位卡片；selectedId / playingId 分别是当前选中与正在播放的作品。
+ * audioRef 是页面唯一的 <audio> 元素，progress 由它的 timeupdate 事件驱动。
+ */
 const backend = ref<BackendState>("checking");
 const history = ref<GenerationResponse[]>([]);
 const pending = ref<PendingGeneration[]>([]);
@@ -73,6 +94,10 @@ async function refresh() {
   }
 }
 
+/**
+ * 原生 audio 事件 -> 播放状态的映射；集中成一张表，便于 onMounted 注册、
+ * onUnmounted 成对解绑，避免监听器泄漏。
+ */
 const audioHandlers: Record<string, () => void> = {
   ended: () => {
     isPlaying.value = false;
@@ -247,7 +272,14 @@ function handleSeek(value: number) {
   progress.value = { ...progress.value, current: value };
 }
 
-/** 「简单创作」生成流程：扩写描述 → 写词 → 起标题 → 提交任务 */
+/**
+ * 「简单创作」四步流程：AI 扩写描述 -> 写词（纯音乐跳过）-> 起标题
+ * -> POST /api/generations 提交后台任务。
+ *
+ * 先插入一条 pending 占位卡片并逐步推进 stageIndex，给用户即时反馈；
+ * 提交成功后移除占位、选中真实记录并刷新列表。任一步失败只把该占位
+ * 卡片标记为错误，不影响作品库里已有的数据。
+ */
 async function handleCreate(values: CreateFormValues) {
   const tempId = `temp-${Date.now()}`;
   const stageLabels: string[] = values.instrumental

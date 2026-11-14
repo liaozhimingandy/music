@@ -2,6 +2,13 @@
 
 把五个阶段串成后台任务：逐阶段落盘 + 写 SQLite 进度 + 更新作品字段。
 任一阶段失败都会把作品置为 failed 并保留已完成阶段的产物，便于续跑。
+
+前端体验链路：POST 返回 ``queued`` -> 本服务置 ``processing`` 并逐阶段
+更新 ``current_stage`` -> 全部完成置 ``ready`` 并写 audio_path；
+前端每 2 秒轮询 /api/history 即可刷新状态与进度。
+
+续跑约定：阶段产物 JSON 存在即视为该阶段已完成（``_execute`` 直接复用），
+产物损坏则重新执行该阶段。因此清理 ``data/outputs/<song_id>/`` 会触发重跑。
 """
 
 from __future__ import annotations
@@ -43,6 +50,12 @@ logger = logging.getLogger(__name__)
 
 
 def _extract_bpm(stage1: dict[str, Any]) -> int | None:
+    """从策划结果里尽量提取 BPM。
+
+    模型返回格式不固定：tempo 可能是 dict（含 bpm / value / range /
+    description）、数字，或带数字的字符串（如 "88-92 BPM"）。这里按顺序
+    尝试并回退到正则取 2~3 位数字，取不到就返回 None（前端显示为空）。
+    """
     tempo = (stage1.get("creation_spec") or {}).get("music", {}).get("tempo")
     if isinstance(tempo, dict):
         for key in ("bpm", "value", "range", "description"):
@@ -63,6 +76,12 @@ def _extract_bpm(stage1: dict[str, Any]) -> int | None:
 
 
 class WorkflowService:
+    """五阶段流程的执行器；由 runtime 的线程池调用 ``run(song_id)``。
+
+    所有依赖（DAL / LLM / 音乐提供方 / 模板）都可注入，冒烟测试正是用
+    mock 客户端 + 临时目录跑通全流程而不联网。
+    """
+
     def __init__(
         self,
         *,
@@ -81,11 +100,18 @@ class WorkflowService:
         self.prompts = prompts or PromptManager(self.config.prompts_dir)
 
     def run(self, song_id: str) -> None:
+        """执行一首歌的完整流程；异常会先落库为 failed 再向上抛出。
+
+        阶段之间还会把中间结果写回 songs 表：阶段三后更新最终标题与歌词，
+        阶段四后更新风格描述、时长、BPM 与 metadata，阶段五后写音频路径
+        并置为 ready。这样即使中途失败，作品库里也能看到已产出的内容。
+        """
         song = self.songs.get(song_id)
         if song is None:
             raise KeyError(f"作品不存在：{song_id}")
 
         store = ArtifactStore(Path(self.config.outputs_dir) / song_id, resume=True)
+        # 优先用落盘的原始输入（未被后续扩写覆盖），保证续跑时输入一致。
         user_input = song.prompt or song.source_prompt or song.title or ""
         if store.exists(USER_INPUT_FILE):
             user_input = store.load_text(USER_INPUT_FILE)
@@ -106,6 +132,7 @@ class WorkflowService:
         )
 
         try:
+            # --- 阶段 1~3：策划 -> 歌词 -> 润色 ---
             stage1 = self._execute(
                 ctx, song_id, STAGE_PLANNING,
                 lambda: run_planning(ctx, user_input), STAGE_LYRICS,
@@ -119,6 +146,7 @@ class WorkflowService:
                 lambda: run_polish(ctx, stage1, stage2), STAGE_MUSIC,
             )
 
+            # 润色结果为准，覆盖前端提交的初始标题 / 歌词。
             final_song = polished["song"]
             self.songs.update(
                 song_id,
@@ -126,6 +154,7 @@ class WorkflowService:
                 lyrics=flatten_lyrics(final_song.get("lyrics")),
             )
 
+            # --- 阶段 4：音乐制作方案，回填展示字段 ---
             plan = self._execute(
                 ctx, song_id, STAGE_MUSIC,
                 lambda: run_music_prompt(ctx, stage1, polished), STAGE_MUSIC_GENERATION,
@@ -146,6 +175,7 @@ class WorkflowService:
                 metadata=metadata,
             )
 
+            # --- 阶段 5：生成音频，作品转为 ready ---
             result = self._execute(
                 ctx, song_id, STAGE_MUSIC_GENERATION,
                 lambda: run_final_music(ctx, plan, instrumental=song.instrumental), None,
@@ -174,6 +204,12 @@ class WorkflowService:
         func: Callable[[], dict[str, Any]],
         next_stage: str | None,
     ) -> dict[str, Any]:
+        """执行单个阶段，并负责断点续跑、进度落盘与异常标记。
+
+        流程：产物已存在且可解析 -> 直接复用；否则标记 running -> 调用
+        ``func()`` -> 原子写产物 -> 标记 completed -> 推进 current_stage。
+        任一异常先标记该阶段 failed 再抛出，由 ``run`` 统一置作品 failed。
+        """
         output = STAGE_OUTPUTS[stage]
         if ctx.store.exists(output):
             try:
@@ -184,6 +220,7 @@ class WorkflowService:
                     self._advance(song_id, next_stage)
                     return cached
             except (ValueError, OSError, json.JSONDecodeError):
+                # 半截 / 损坏的 JSON 不能信任，重新跑这一阶段。
                 logger.warning("阶段产物损坏，重新执行：%s", stage)
 
         logger.info("开始执行阶段：%s", stage)
@@ -201,4 +238,5 @@ class WorkflowService:
             raise
 
     def _advance(self, song_id: str, stage: str | None) -> None:
+        """更新作品当前阶段；传 None 表示全部完成，前端不再显示进度。"""
         self.songs.update(song_id, current_stage=stage)

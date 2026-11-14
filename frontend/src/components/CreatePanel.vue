@@ -1,4 +1,13 @@
 <script setup lang="ts">
+/**
+ * 左栏「简单创作」表单。
+ * props: isSubmitting（提交中禁用）、expandPrompt（AI 扩写回调）
+ * emits: submit(formValues)
+ *
+ * 描述上限 MAX_PROMPT_LENGTH = 500：模板用 maxlength 拦键盘输入，
+ * 另用 watch + clamp() 兜底程序赋值 / 粘贴的超长文本（原生属性能被绕过）。
+ * 纯音乐开关开启后，父组件的 handleCreate 会跳过写词这一步。
+ */
 import { computed, ref, watch } from "vue";
 import { Button as TButton, MessagePlugin, Switch as TSwitch, Textarea as TTextarea } from "tdesign-vue-next";
 import { EditIcon, SoundIcon } from "tdesign-icons-vue-next";
@@ -19,6 +28,7 @@ const prompt = ref("");
 const instrumental = ref(false);
 const expanding = ref(false);
 
+/** 字数计数与「接近上限」提示：达到 90% 时输入框与提示文字转为警示态 */
 const charCount = computed(() => prompt.value.length);
 const nearLimit = computed(() => charCount.value >= MAX_PROMPT_LENGTH * 0.9);
 

@@ -1,7 +1,11 @@
 """端到端冒烟测试（离线 mock，不调用任何外部 API、不消耗密钥）。
 
-运行：backend/.venv/Scripts/python.exe backend/tests/smoke_test.py
+运行：``backend/.venv/Scripts/python.exe backend/tests/smoke_test.py``
 覆盖：建表 → 健康检查 → LLM 三任务 → 创建作品 → 后台五阶段 → 音频 → 删除。
+
+实现要点：环境变量必须在 ``import app`` **之前**设置，因为 Settings 在模块
+导入时就实例化；数据目录指向 tests/.tmp（已被 .gitignore 忽略），每次运行
+先清空，保证结果可复现、不污染真实作品库。
 """
 
 from __future__ import annotations
@@ -17,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
 TMP = Path(__file__).resolve().parent / ".tmp"
-os.environ["MUSIC_STUDIO_MOCK"] = "true"
-os.environ["MUSIC_STUDIO_DATA_DIR"] = str(TMP / "data")
+os.environ["MUSIC_STUDIO_MOCK"] = "true"                 # 强制离线，不发网络请求
+os.environ["MUSIC_STUDIO_DATA_DIR"] = str(TMP / "data")  # 隔离数据库与产物目录
 shutil.rmtree(TMP, ignore_errors=True)
 TMP.mkdir(parents=True, exist_ok=True)
 
@@ -27,6 +31,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.main import app  # noqa: E402
 
+# 前端 interface/index.ts 里 GenerationResponse 的字段白名单；
+# 任何字段改名导致契约破坏，下面第 3 步就会断言失败。
 FRONTEND_FIELDS = {
     "id", "title", "task_type", "mode", "model_variant", "status", "prompt", "lyrics",
     "instrumental", "duration_seconds", "bpm", "key", "time_signature", "audio_url",
@@ -36,13 +42,16 @@ FRONTEND_FIELDS = {
 
 
 def check(condition: bool, message: str) -> None:
+    """极简断言：失败即抛 AssertionError，成功打印一行 OK。"""
     if not condition:
         raise AssertionError(message)
     print(f"  [OK] {message}")
 
 
 def main() -> None:
+    """TestClient 的 with 会触发 lifespan，从而自动建表与清理线程池。"""
     with TestClient(app) as client:
+        # --- 1. 应用启动与数据库结构 ---
         print("1) 健康检查与建表")
         health = client.get("/health")
         check(health.status_code == 200, "GET /health 返回 200")
@@ -52,6 +61,7 @@ def main() -> None:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         check({"songs", "song_stages"} <= tables, "SQLite 建出 songs / song_stages 两张表")
 
+        # --- 2. 前端三个 AI 按钮 ---
         print("2) 前端依赖的三个 LLM 任务")
         for task in ("prompt", "lyrics", "title"):
             response = client.post("/api/llm", json={
@@ -62,6 +72,7 @@ def main() -> None:
             })
             check(response.status_code == 200 and bool(response.json()["output"]), f"POST /api/llm [{task}] 有输出")
 
+        # --- 3. 创建作品：验证立即返回 + 响应字段符合前端契约 ---
         print("3) 创建作品（立即返回，后台跑五阶段）")
         created = client.post("/api/generations", json={
             "title": "夏末告别",
@@ -80,6 +91,7 @@ def main() -> None:
         check(data["status"] in ("queued", "processing", "ready"), "初始状态为前端认识的状态值")
         song_id = data["id"]
 
+        # --- 4. 轮询后台线程：验证五阶段编排与结果回填 ---
         print("4) 轮询等待后台五阶段完成")
         deadline = time.monotonic() + 30
         detail: dict = {}
@@ -94,6 +106,7 @@ def main() -> None:
         check(all(item["status"] == "completed" for item in stages), "五个阶段全部 completed")
         check(bool(detail["title"]) and bool(detail["lyrics"]) and bool(detail["style_prompt"]), "标题 / 歌词 / 风格提示词已回填")
 
+        # --- 5. 作品库与音频：验证前端播放链路 ---
         print("5) 作品库与音频")
         history = client.get("/api/history").json()
         check(isinstance(history, list) and len(history) == 1, "GET /api/history 返回 1 条作品")
@@ -101,6 +114,7 @@ def main() -> None:
         audio = client.get(f"/api/generations/{song_id}/audio")
         check(audio.status_code == 200 and audio.content[:4] == b"RIFF", "音频接口返回可播放的 WAV 数据")
 
+        # --- 6. 删除：验证级联清理 ---
         print("6) 删除")
         deleted = client.delete(f"/api/generations/{song_id}")
         check(deleted.status_code == 200, "DELETE /api/generations/{id} 返回 200")

@@ -2,7 +2,18 @@
 
 每个阶段只做「取输入 → 渲染 Prompt → 调 LLM → 校验结构 → 返回 dict」，
 不写数据库、不写文件，落盘与进度由 WorkflowService 统一负责，便于单测与复用。
+
+五个阶段（顺序见 constants.STAGE_ORDER）：
+
+1. ``planning``  解析需求，产出 creation_spec
+2. ``lyrics``    产出分段歌词
+3. ``polish``    润色歌词 + 演唱设计
+4. ``music``     产出 ACE-Step 制作方案（style / 时长）
+5. ``synthesize``（run_final_music）调用音乐生成接口并下载音频
+
 Prompt 模板变量严格对齐 backend/app/prompts（StrictUndefined，缺变量会直接报错）。
+**维护提示**：新增模板变量时，要同时改对应 user.md（由用户维护，不可擅自修改）
+与本文件的 get_stage 调用参数，否则运行期会立刻抛 UndefinedError。
 """
 
 from __future__ import annotations
@@ -20,6 +31,7 @@ from .prompt_manager import PromptManager
 
 logger = logging.getLogger(__name__)
 
+# 分段歌词的内部键 -> 中文段落标记，用于把 dict 拍平成可展示的歌词文本。
 SECTION_LABELS: dict[str, str] = {
     "intro": "前奏",
     "verse_1": "主歌 1",
@@ -36,20 +48,32 @@ SECTION_LABELS: dict[str, str] = {
 
 @dataclass
 class StageContext:
-    llm: Any
-    prompts: PromptManager
-    provider: Any
-    store: ArtifactStore
+    """五个阶段共享的依赖容器，由 WorkflowService 每次任务构造一次。
+
+    把 LLM / 模板 / 音乐提供方 / 产物目录都收进上下文，阶段函数就能保持
+    纯函数形态：同样输入 + 同样上下文 = 同样输出，测试可直接注入 mock。
+    """
+
+    llm: Any                         # 满足 LLMClientProtocol 的客户端
+    prompts: PromptManager           # 只读模板加载器
+    provider: Any                    # 满足 generate(...) 的音乐提供方
+    store: ArtifactStore             # 该作品的输出目录
     config: Any = field(default_factory=lambda: settings)
     initial_title: str = ""  # 前端提交时起的标题，供离线 mock / 兜底使用
 
     @property
     def music_work_dir(self) -> Path:
+        """音乐阶段独立子目录，存放 music_task.json 与最终音频。"""
         return self.store.task_dir / "music"
 
 
 def flatten_lyrics(value: Any) -> str:
-    """把分段歌词 dict 拍平成前端可直接展示的字符串。"""
+    """把分段歌词 dict 拍平成前端可直接展示的字符串。
+
+    输入可能是字符串（已是最终歌词）或 ``{"verse_1": "...", ...}``；
+    未知段落键原样作为标记，空段落跳过。字符串以 ``[段落名]`` 开头、
+    段落间空行分隔，正好符合前端歌词展示格式。
+    """
     if isinstance(value, str):
         return value
     if not isinstance(value, dict):
@@ -63,6 +87,7 @@ def flatten_lyrics(value: Any) -> str:
 
 
 def _original_request(stage1: dict[str, Any]) -> str:
+    """从阶段一结果里取用户原始描述；缺失时给出可定位的报错。"""
     try:
         return str(stage1["input_summary"]["original_request"])
     except (KeyError, TypeError) as exc:
@@ -70,7 +95,11 @@ def _original_request(stage1: dict[str, Any]) -> str:
 
 
 def run_planning(ctx: StageContext, user_input: str) -> dict[str, Any]:
-    """阶段 1：音乐创作需求解析与歌曲策划。"""
+    """阶段 1：音乐创作需求解析与歌曲策划。
+
+    模板变量：``original_request``。校验 stage 标识为 PLANNING 且存在
+    creation_spec；后续所有阶段都依赖这份策划。
+    """
     if not isinstance(user_input, str) or not user_input.strip():
         raise ValueError("用户创作需求不能为空")
     prompt = ctx.prompts.get_stage(STAGE_PLANNING, original_request=user_input.strip())
@@ -90,7 +119,11 @@ def run_planning(ctx: StageContext, user_input: str) -> dict[str, Any]:
 
 
 def run_lyrics(ctx: StageContext, stage1: dict[str, Any]) -> dict[str, Any]:
-    """阶段 2：根据歌曲策划生成完整原创歌词。"""
+    """阶段 2：根据歌曲策划生成完整原创歌词。
+
+    模板变量：``original_request`` / ``creation_spec``（直接传对象给模板）。
+    校验阶段标识与 ``song.lyrics`` 非空。
+    """
     if not isinstance(stage1, dict) or not stage1.get("creation_spec"):
         raise ValueError("第一阶段缺少歌曲策划内容")
     prompt = ctx.prompts.get_stage(
@@ -116,7 +149,12 @@ def run_lyrics(ctx: StageContext, stage1: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_polish(ctx: StageContext, stage1: dict[str, Any], stage2: dict[str, Any]) -> dict[str, Any]:
-    """阶段 3：歌词润色与旋律演唱设计。"""
+    """阶段 3：歌词润色与旋律演唱设计。
+
+    模板变量：``original_request`` / ``creation_spec`` / ``song``，后两者
+    先 json.dumps 成结构化文本再交给模板。校验润色结果必须带 lyrics 与
+    title——这两个字段会覆盖前端提交的初值写回作品表。
+    """
     if not isinstance(stage1, dict) or not stage1.get("creation_spec"):
         raise ValueError("第一阶段缺少歌曲策划内容")
     if not isinstance(stage2, dict) or not isinstance(stage2.get("song"), dict):
@@ -152,7 +190,12 @@ def run_polish(ctx: StageContext, stage1: dict[str, Any], stage2: dict[str, Any]
 
 
 def run_music_prompt(ctx: StageContext, stage1: dict[str, Any], polished: dict[str, Any]) -> dict[str, Any]:
-    """阶段 4：生成 ACE-Step 音乐制作方案。"""
+    """阶段 4：生成 ACE-Step 音乐制作方案。
+
+    模板变量：target_model / original_request / music_spec / lyrics_direction /
+    title / final_lyrics / vocal_melody_design。校验目标模型与标题未被模型
+    擅自改动，否则最终音频会与作品信息对不上。
+    """
     model_name = ctx.config.music_model
     creation_spec = stage1["creation_spec"]
     song = polished["song"]
@@ -185,7 +228,11 @@ def run_music_prompt(ctx: StageContext, stage1: dict[str, Any], polished: dict[s
 
 
 def run_final_music(ctx: StageContext, plan: dict[str, Any], *, instrumental: bool) -> dict[str, Any]:
-    """阶段 5：按制作方案调用音乐生成接口并下载音频。"""
+    """阶段 5：按制作方案调用音乐生成接口并下载音频。
+
+    纯音乐时把歌词固定为 ``[Instrumental]``；其余情况用方案里的最终歌词。
+    返回 provider 结果并补上 title / prompt / duration，供 WorkflowService 落库。
+    """
     title = plan["song"]["title"]
     style = plan["music_prompts"]["style"]
     duration = int(plan["ace_music_settings"]["duration_seconds"])

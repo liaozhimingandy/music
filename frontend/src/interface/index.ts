@@ -1,4 +1,14 @@
-/** 与后端 backend/app/schemas 对齐的数据结构 */
+/**
+ * 前后端数据契约（与 backend/app/models/schemas.py 一一对应）。
+ *
+ * 维护约定：
+ * - GenerationResponse 字段改名必须同步后端 GenerationResponse 与
+ *   SongService.to_response()，否则作品库会渲染出 undefined。
+ * - status 只用 queued / processing / ready / failed，文案映射在 common/utils.ts。
+ * - key 对应数据库的 musical_key；audio_url 是相对 /api 的路径或 blob URL，
+ *   为空表示音频尚未生成，播放器会禁用播放按钮。
+ * - metadata 是不定型扩展字段，离线演示模式把 _queuedAt 暂存在这里。
+ */
 
 export type TaskType = "text2music" | "cover" | "repaint";
 export type ModelVariant = "base" | "turbo" | "shift";

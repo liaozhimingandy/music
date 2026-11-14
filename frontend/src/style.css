@@ -1,6 +1,13 @@
 @tailwind components;
 @tailwind utilities;
 
+/**
+ * 全局样式：TDesign 主题变量覆盖 + 网易云风格播放器组件样式。
+ * 分区顺序：:root 主题色 -> 基础重置 -> 滚动条/封面 -> 黑胶唱片 -> range 滑杆 -> 状态标签。
+ * Tailwind 的 brand-* 色阶在 tailwind.config.js 定义，与此处 --td-brand-* 配套；
+ * 改主色时两个文件要一起改，否则按钮与进度条颜色会不一致。
+ */
+
 :root {
   font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   color: #1d2129;

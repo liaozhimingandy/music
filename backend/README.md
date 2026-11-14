@@ -31,6 +31,30 @@ backend/app/
 
 依赖方向严格单向：`routers → service → dal → model`。`dal` 不含业务判断，`service` 不直接写 SQL。
 
+## 代码导览（给维护者）
+
+所有源码都有模块级 docstring 与方法注释，按下面的顺序读最快：
+
+1. `constants.py` + `config.py` —— 阶段名、产物名、状态枚举与全部运行开关。
+2. `models/` —— `db_schema.py`（两张表 DDL）、`entities.py`（数据库行 ↔ 实体）、`schemas.py`（前后端契约）。
+3. `dal/` —— 每个方法只做一次 SQL / 文件读写；`database.py` 统一管事务与 WAL。
+4. `services/stage_steps.py` —— 五个纯函数，是「一首歌怎么被写出来」的核心。
+5. `services/workflow_service.py` —— 串起五阶段、写进度、断点续跑。
+6. `services/song_service.py` —— 前端字段的唯一映射点（`musical_key → key` 等）。
+7. `routers/` + `main.py` —— 对外接口与应用生命周期。
+
+常见改动的落点：
+
+| 要改什么 | 依次改哪里 |
+| --- | --- |
+| 新增数据库字段 | `models/db_schema.py`（DDL + `SONG_COLUMNS`）→ `entities.py` → `schemas.py` → `song_service.to_response()` |
+| 调整提示词变量 | `stage_steps.py` 里的 `get_stage(...)` 参数 + `prompts/<阶段>/user.md`（模板由业务侧维护） |
+| 新增生成阶段 | `constants.py` 注册阶段名与产物名 → `stage_steps.py` 加阶段函数 → `workflow_service.run()` 串入流程 |
+| 新增接口 | `models/schemas.py` 定义模型 → `routers/` 加端点 → `docs/api.md` 同步 |
+| 调整轮询 / 播放行为 | 前端 `pages/StudioPage.vue`、`services/api.ts`、`common/config.ts` |
+
+**红线**：`backend/app/prompts/` 下的 8 个 md 是业务资产，代码只读取、不修改；改模板变量前先与提示词负责人确认。密钥只放被忽略的 `.env`，不要写回代码或提交。
+
 ## 安装与启动
 
 ```bash

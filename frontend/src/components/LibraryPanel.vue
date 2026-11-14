@@ -1,4 +1,12 @@
 <script setup lang="ts">
+/**
+ * 中间栏「作品库」卡片列表。
+ *
+ * 渲染两类卡片：pendingItems（本地「生成中」占位，展示分阶段进度）与
+ * items（后端返回的真实作品）。卡片 DOM id 为 `song-<id>`，供顶栏的
+ * showLibrary() 用 scrollIntoView 定位到当前选中作品。
+ * 右上角更多菜单靠全局 click 监听关闭（onMounted / onUnmounted 成对解绑）。
+ */
 import { onMounted, onUnmounted, ref } from "vue";
 import { Button as TButton, Progress as TProgress, Tag as TTag } from "tdesign-vue-next";
 import { DeleteIcon, DownloadIcon, MoreIcon, PauseIcon, PlayIcon } from "tdesign-icons-vue-next";
@@ -32,6 +40,7 @@ const emit = defineEmits<{
   download: [item: GenerationResponse];
 }>();
 
+/** 同一时刻只允许一个卡片展开更多菜单；点击空白处由全局监听统一关闭 */
 const menuOpenId = ref<string | null>(null);
 
 function closeMenu() {
@@ -69,6 +78,7 @@ function deleteItem(id: string) {
         </div>
       </div>
 
+      <!-- 生成中的本地占位卡片：阶段进度来自 pendingItems，不来自后端 -->
       <div class="space-y-3">
         <div
           v-for="item in pendingItems"

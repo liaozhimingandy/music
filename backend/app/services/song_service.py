@@ -1,7 +1,11 @@
 """service 层：面向 API 的作品服务。
 
-负责把前端 GenerationCreate 转成数据库记录、启动后台生成任务、
+职责：把前端 GenerationCreate 转成数据库记录 -> 启动后台生成任务 ->
 把 SongRecord 映射成前端需要的 GenerationResponse。
+这是「前端契约」与「数据库实体」之间唯一的转换点，改字段优先改这里。
+
+注意：本类不执行五阶段流程，具体编排在 WorkflowService；
+生成任务通过构造参数 ``submit_job`` 注入，单测可换成同步执行。
 """
 
 from __future__ import annotations
@@ -28,11 +32,19 @@ logger = logging.getLogger(__name__)
 
 
 def _fallback_title(prompt: str) -> str:
+    """用户没填标题时，取描述前 18 字作为临时标题（后续可能被润色阶段覆盖）。"""
     cleaned = " ".join(prompt.split())
     return (cleaned[:18] or "未命名作品").strip()
 
 
 class SongService:
+    """作品 CRUD + 响应组装。
+
+    Args:
+        submit_job: 接收 song_id 的回调，用于把生成任务丢进后台线程池。
+        config / songs / stages: 均可注入，便于测试隔离数据库。
+    """
+
     def __init__(
         self,
         *,
@@ -49,6 +61,15 @@ class SongService:
     # ---------------- 查询 ----------------
 
     def to_response(self, record: SongRecord) -> GenerationResponse:
+        """数据库实体 -> 前端响应，是全项目唯一的字段映射处。
+
+        三处需要特别留意：
+        * ``musical_key`` 映射成前端的 ``key``；
+        * ``audio_url`` 只有在本地音频文件确实存在时才生成，避免前端
+          拿到 404 的播放地址；外部已有 URL 时原样透传；
+        * ``task_type`` / ``model_variant`` 做白名单兜底，历史脏数据不会
+          触发 Pydantic Literal 校验错误导致整个列表接口失败。
+        """
         audio_url: str | None = None
         if record.audio_path and Path(record.audio_path).is_file():
             audio_url = f"/api/generations/{record.id}/audio"
@@ -81,12 +102,15 @@ class SongService:
         )
 
     def list_history(self, limit: int = 25) -> list[GenerationResponse]:
+        """作品库列表（倒序），供 GET /api/history 轮询。"""
         return [self.to_response(item) for item in self.songs.list(limit)]
 
     def get(self, song_id: str) -> SongRecord | None:
+        """按 ID 取实体，供音频路由等内部使用；不存在返回 None。"""
         return self.songs.get(song_id)
 
     def get_detail(self, song_id: str) -> GenerationDetailResponse | None:
+        """作品详情 = 基础响应 + 带中文标签的五阶段进度。"""
         record = self.songs.get(song_id)
         if record is None:
             return None
@@ -107,6 +131,13 @@ class SongService:
     # ---------------- 写入 ----------------
 
     def create(self, payload: GenerationCreate) -> GenerationResponse:
+        """创建作品并立即返回 ``queued``，不等待生成完成。
+
+        步骤：生成 ID -> 推导封面主题 -> 写 songs 表 -> 预置五阶段 ->
+        保存用户原始输入（阶段一要用）-> 提交后台任务。
+        提交失败时不抛异常给前端，而是把作品置为 failed 并附错误信息，
+        保证「点了生成却查不到记录」的情况不会出现。
+        """
         song_id = uuid.uuid4().hex
         prompt = (payload.inputs.prompt or "").strip()
         lyrics = payload.inputs.lyrics or ""
@@ -142,6 +173,11 @@ class SongService:
         return self.to_response(record)
 
     def delete(self, song_id: str) -> bool:
+        """删除作品：先清输出目录，再删数据库记录（阶段记录靠外键级联）。
+
+        安全约束：仅当 ``task_dir`` 的父目录正是 outputs 根目录时才整目录
+        删除，防止 song_id 被构造成 ``..`` 之类路径误删其他目录。
+        """
         record = self.songs.get(song_id)
         if record is None:
             return False

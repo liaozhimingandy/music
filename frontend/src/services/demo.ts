@@ -1,4 +1,11 @@
-/** 离线演示数据：后端未启动时，界面与生成流程仍可完整预览 */
+/**
+ * 离线演示数据：后端未启动时，界面与生成流程仍可完整预览。
+ *
+ * songs 是模块级可变数组（内存态，刷新页面即重置）；
+ * createDemoAudioUrl 在浏览器内合成 WAV 并生成 Blob URL，让播放、进度条与
+ * 唱片旋转有真实反馈。demoHistory 会把 queued 超过 3.5 秒的任务改成 ready，
+ * 用来模拟后端的后台生成。所有导出函数签名与 services/api.ts 的真实接口一致。
+ */
 import type { GenerationCreate, GenerationResponse, LLMTaskResponse } from "@/interface";
 
 const now = Date.now();
@@ -46,8 +53,10 @@ function createDemoAudioUrl(seed: number, seconds = 12): string | null {
   return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
 }
 
+/** 四段浏览器内合成的演示音频（Blob URL），分别给预置作品使用 */
 const DEMO_TRACKS = [0, 1, 2, 3].map((seed) => createDemoAudioUrl(seed));
 
+/** 预置的四首演示作品，覆盖 ready / processing / failed 状态以便检查各种 UI 表现 */
 let songs: GenerationResponse[] = [
   {
     id: "demo-evening-wind",
@@ -167,6 +176,7 @@ export function demoHistory(): GenerationResponse[] {
   return [...songs].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 }
 
+/** 演示模式下创建作品：先入队 queued，由 demoHistory 在几秒后置为 ready */
 export function demoCreate(payload: GenerationCreate): GenerationResponse {
   const id = `demo-${Date.now()}`;
   const song: GenerationResponse = {

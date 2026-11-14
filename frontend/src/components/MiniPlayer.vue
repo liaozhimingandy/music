@@ -1,4 +1,9 @@
 <script setup lang="ts">
+/**
+ * 播放器收起后的右下角悬浮入口：小唱片 + 播放/暂停 + 展开按钮。
+ * 与 PlaybackBar 互斥显示（由 StudioPage 的 playerVisible 切换），
+ * 这样收起播放器后仍能控制播放、随时展开。
+ */
 import { computed } from "vue";
 import { ChevronUpIcon, PauseIcon, PlayIcon } from "tdesign-icons-vue-next";
 

@@ -1,7 +1,17 @@
 """service 层：ModelScope ACE-Step 异步音乐生成客户端。
 
-保留原型的四项能力：参数指纹去重、task_id 断点续跑、已完成直接返回、
-生成成功但下载失败时只重新下载。改用 httpx 统一网络栈。
+保留原型的四项能力（这是本模块最需要维护者理解的约定）：
+
+1. **参数指纹去重**：model + prompt + lyrics + duration 做 sha256，写入
+   ``music_task.json``；同目录换了参数会拒绝复用，避免张冠李戴。
+2. **task_id 断点续跑**：提交后把 task_id 落盘，进程重启可继续轮询同一个
+   远端任务，不重复计费、不重复生成。
+3. **已完成直接返回**：状态 completed 且本地音频文件仍在时直接返回结果。
+4. **下载失败只重下**：状态 generated 表示远端已成功，下次跳过轮询直接
+   重新下载音频。
+
+网络请求统一用 httpx；状态流转大致为
+``submitted -> (polling) -> generated -> completed``，异常分支为 ``failed``。
 """
 
 from __future__ import annotations
@@ -28,6 +38,14 @@ logger = logging.getLogger(__name__)
 
 
 class MusicProvider:
+    """真实音乐生成客户端：提交异步任务 -> 轮询 -> 流式下载音频。
+
+    Args:
+        config: 可注入的配置对象；缺省使用全局 settings。
+            关键项：MUSIC_API_TOKEN / MUSIC_API_BASE_URL / MUSIC_MODEL /
+            MUSIC_POLL_INTERVAL / MUSIC_TIMEOUT / MUSIC_DOWNLOAD_TIMEOUT。
+    """
+
     def __init__(self, config: Any = None) -> None:
         cfg = config or settings
         self.base_url = cfg.music_api_base_url.rstrip("/")
@@ -46,6 +64,18 @@ class MusicProvider:
         work_dir: Path,
         force_regenerate: bool = False,
     ) -> dict[str, Any]:
+        """生成一段音频并返回任务结果（含本地 ``audio_path``）。
+
+        Args:
+            prompt: 阶段四产出的风格描述（style）。
+            lyrics: 最终歌词；纯音乐时由调用方传入 ``[Instrumental]``。
+            duration: 目标时长（秒）。
+            work_dir: 该歌曲的 ``music/`` 工作目录，存放 music_task.json 与音频。
+            force_regenerate: 忽略已有记录、强制重新提交；用于参数变更或上次失败。
+
+        返回字典键：task_id / model / status / audio_url / audio_path / duration。
+        """
+        # --- 入参校验：这些错误不值得发网络请求 ---
         if not self.token:
             raise RuntimeError("未配置 MUSIC_API_TOKEN，请在 backend/app/.env 中填写")
         if not prompt or not prompt.strip():
@@ -60,15 +90,18 @@ class MusicProvider:
         work_dir.mkdir(parents=True, exist_ok=True)
         store = ArtifactStore(work_dir, resume=True)
 
+        # 指纹用 sort_keys 保证字典顺序变化不会影响哈希结果。
         fingerprint_data = {"model": self.model, "prompt": prompt, "lyrics": lyrics, "duration": duration}
         fingerprint = hashlib.sha256(
             json.dumps(fingerprint_data, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
 
+        # --- 读取已有任务记录，决定复用 / 续跑 / 拒绝 / 重提交 ---
         task: dict[str, Any] | None = None
         if store.exists(MUSIC_TASK_FILE):
             task = store.load_json(MUSIC_TASK_FILE)
             if task.get("fingerprint") != fingerprint:
+                # 目录被别的参数占用：默认拒绝，避免返回不匹配的音频。
                 if not force_regenerate:
                     raise RuntimeError("当前任务目录已存在其他参数的生成记录，请使用新目录或 force_regenerate=True")
                 task = None
@@ -86,6 +119,7 @@ class MusicProvider:
 
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
         with httpx.Client(timeout=60.0) as client:
+            # --- 首次提交：异步模式头不可少，否则接口会同步等待直到超时 ---
             if task is None:
                 logger.info("提交音乐生成任务，模型=%s，时长=%ss", self.model, duration)
                 response = client.post(
@@ -116,6 +150,7 @@ class MusicProvider:
 
             task_id = task["task_id"]
 
+            # --- 轮询远端状态；generated 表示已成功并拿到了音频 URL ---
             if task.get("status") != "generated":
                 started = time.monotonic()
                 last_status: str | None = None
@@ -147,6 +182,7 @@ class MusicProvider:
                         last_status = status
                     time.sleep(self.poll_interval)
 
+            # --- 下载音频：流式写盘，避免大文件占满内存 ---
             audio_url = task["audio_url"]
             suffix = Path(urlparse(audio_url).path).suffix or ".audio"
             output_path = work_dir / f"{FINAL_AUDIO_NAME}{suffix}"
@@ -164,6 +200,7 @@ class MusicProvider:
 
     @staticmethod
     def _result(task: dict[str, Any], audio_path: Path, duration: int) -> dict[str, Any]:
+        """统一结果结构，供 WorkflowService 写入 songs 表。"""
         return {
             "task_id": task["task_id"],
             "model": task["model"],
@@ -188,6 +225,11 @@ class MockMusicProvider:
         work_dir: Path,
         force_regenerate: bool = False,  # noqa: ARG002
     ) -> dict[str, Any]:
+        """写入 8 秒 11kHz 单声道 WAV（三谐波 + 淡入淡出），返回与真实实现同构的结果。
+
+        固定 8 秒而非请求时长，是为了让本地演示秒级完成；``duration``
+        仍原样回填到结果里，保证前端展示与真实模式一致。
+        """
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
         store = ArtifactStore(work_dir, resume=True)
@@ -202,7 +244,7 @@ class MockMusicProvider:
             frames = bytearray()
             for index in range(sample_rate * seconds):
                 t = index / sample_rate
-                fade = min(1.0, t * 2, (seconds - t) * 2)
+                fade = min(1.0, t * 2, (seconds - t) * 2)  # 首尾各 0.5s 淡入淡出，避免爆音
                 value = sum(math.sin(2 * math.pi * 220 * ratio * t) / (i + 1) for i, ratio in enumerate((1, 1.25, 1.5)))
                 frames.extend(struct.pack("<h", int(value * fade * 8000)))
             wav.writeframes(bytes(frames))
@@ -223,6 +265,7 @@ class MockMusicProvider:
 
 
 def build_music_provider(config: Any = None) -> MusicProvider | MockMusicProvider:
+    """工厂：mock 模式或缺 token 时返回 MockMusicProvider，否则返回真实客户端。"""
     cfg = config or settings
     if cfg.mock_mode or not cfg.music_api_token:
         return MockMusicProvider()

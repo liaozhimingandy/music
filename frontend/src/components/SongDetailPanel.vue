@@ -1,4 +1,10 @@
 <script setup lang="ts">
+/**
+ * 右栏作品详情：封面、元信息、风格描述 / 歌词折叠面板、下载与删除。
+ *
+ * 纯展示组件，song 由父组件传入；删除前用 window.confirm 二次确认，
+ * 复制走 navigator.clipboard（失败时降级为提示手动选择文本）。
+ */
 import {
   Button as TButton,
   Collapse as TCollapse,
@@ -31,6 +37,7 @@ const emit = defineEmits<{
   download: [];
 }>();
 
+/** 复制文本到剪贴板；非安全上下文或权限被拒时降级为提示手动复制 */
 async function copy(text?: string | null) {
   if (!text) return;
   try {

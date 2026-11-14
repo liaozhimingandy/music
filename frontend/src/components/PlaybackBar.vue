@@ -1,4 +1,11 @@
 <script setup lang="ts">
+/**
+ * 底部完整播放栏（网易云风格）：左旋转黑胶、中控制区与进度条、右音量与菜单。
+ *
+ * 纯展示 + 事件组件，不持有 <audio>；所有操作 emit 给 StudioPage 处理。
+ * 进度 / 音量用原生 range，通过 CSS 变量 --fill 画已播放部分（见 style.css）。
+ * 黑胶旋转由 .netease-disc.is-playing 控制；「收起播放器」发 hide 事件。
+ */
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { Button as TButton, Tag as TTag } from "tdesign-vue-next";
 import {
@@ -43,6 +50,7 @@ const emit = defineEmits<{
 const menuOpen = ref(false);
 const liked = ref(false);
 
+/** 进度由 StudioPage 传入；current 钳制在总时长内，避免拖动越界 */
 const duration = computed(() => props.progress.duration || 0);
 const current = computed(() => Math.min(props.progress.current, duration.value || 0));
 const percent = computed(() => (duration.value > 0 ? (current.value / duration.value) * 100 : 0));
@@ -55,6 +63,7 @@ function closeMenu() {
 onMounted(() => document.addEventListener("click", closeMenu));
 onUnmounted(() => document.removeEventListener("click", closeMenu));
 
+/** range 的 input 事件把字符串值转成秒 / 音量后，交给父组件处理 */
 function onSeek(event: Event) {
   emit("seek", Number((event.target as HTMLInputElement).value));
 }

@@ -200,6 +200,8 @@ GitHub Pages 的 base 路径由 CI 按 `github.event.repository.name` 自动注�
 
 - `.gitignore` 中的 `models/`、`data/` 已收窄为「仅仓库根目录」，避免误伤源码目录 `backend/app/models/` 与 `frontend/src/` 下的文件；另外忽略 `.env`、`.venv/`、`*.egg-info/`、`backend/app/outputs/`、`.ipynb_checkpoints/` 等产物。
 - 后端已从「本地 ACE-Step 引擎 + SQLAlchemy」整体替换为「云端 LLM + ModelScope + 原生 sqlite3」的 `service → dal → model` 三层；原型脚本 `music.py` 与旧引擎代码已删除，`prompts/` 内容保持原样只读。
+- 前后端源码已补齐维护注释：每个模块开头有职责说明，关键类 / 方法带 docstring 或 JSDoc，状态机、断点续跑、字段映射等易踩坑处有专门说明。后端的推荐阅读顺序与常见改动落点见 [后端说明](./backend/README.md)。
+- `backend/app/prompts/` 下的提示词模板是业务资产，本轮注释工作只读、未修改任何模板内容（8 个 md 文件校验值前后一致）。
 - 类型检查用 `vue-tsc --noEmit -p tsconfig.app.json`，不会生成 `vite.config.js` / `*.tsbuildinfo` 等产物污染工作树（Vite 会优先读取 `.js` 配置，曾与 `.ts` 配置冲突）。
 - `.env.development` / `.env.production` 是可提交的模板配置（不含密钥）；本地私密变量请放 `.env.local`（已被忽略）。
 

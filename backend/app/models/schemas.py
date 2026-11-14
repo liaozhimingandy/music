@@ -1,4 +1,8 @@
-"""model 层：API 请求 / 响应模型，字段与前端 src/interface/index.ts 对齐。"""
+"""model 层：API 请求 / 响应模型，字段与前端 src/interface/index.ts 对齐。
+
+这一层是前后端契约：改字段名或状态取值前，务必同步修改前端 interface 与
+services/api.ts。响应模型由 SongService 统一组装，路由不直接返回数据库实体。
+"""
 
 from __future__ import annotations
 
@@ -6,34 +10,42 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+# 枚举值来自前端的下拉项 / 任务类型，勿随意改名。
 TaskType = Literal["text2music", "cover", "repaint"]
 ModelVariant = Literal["base", "turbo", "shift"]
 LLMTask = Literal["prompt", "lyrics", "title"]
 
 
 class GenerationInputs(BaseModel):
-    """前端「简单创作」提交的三项输入。"""
+    """前端「简单创作」提交的三项输入，另带两个可选的音乐参数。
 
-    prompt: str | None = None
-    lyrics: str | None = None
+    ``instrumental`` 为真时 lyrics 会被忽略，服务端按纯音乐处理。
+    """
+
+    prompt: str | None = None       # 用户描述（最多 500 字，前端已做截断）
+    lyrics: str | None = None       # 用户自填歌词，可为空由 LLM 生成
     instrumental: bool = False
     bpm: int | None = Field(default=None, ge=30, le=300)
     duration_seconds: int | None = Field(default=None, ge=10, le=600)
 
 
 class GenerationCreate(BaseModel):
-    title: str | None = None
+    """POST /api/generations 请求体。创建后立刻返回 queued，不等待生成完成。"""
+
+    title: str | None = None        # 初值；流程结束后可能被润色阶段的标题覆盖
     task_type: TaskType = "text2music"
     mode: str = "simple"
     model_variant: ModelVariant = "turbo"
     inputs: GenerationInputs = Field(default_factory=GenerationInputs)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)  # 透传的扩展信息
 
 
 class StageResponse(BaseModel):
+    """单个阶段的进度，用于 GET /api/generations/{id}/stages 与详情响应。"""
+
     stage: str
-    label: str
-    status: str
+    label: str                        # 中文展示名，来自 constants.STAGE_LABELS
+    status: str                       # pending / running / completed / failed
     output_file: str | None = None
     error: str | None = None
     started_at: str | None = None
@@ -41,14 +53,18 @@ class StageResponse(BaseModel):
 
 
 class GenerationResponse(BaseModel):
-    """GET /api/history、POST /api/generations 的作品结构（前端强依赖）。"""
+    """GET /api/history、POST /api/generations 的作品结构（前端强依赖）。
+
+    ``key`` 对应数据库列 ``musical_key``；``audio_url`` 为相对路径，前端
+    直接拼到 <audio src> 上，离线演示模式下由 Vite 代理到后端。
+    """
 
     id: str
     title: str | None = None
     task_type: TaskType = "text2music"
     mode: str = "simple"
     model_variant: ModelVariant = "turbo"
-    status: str = "queued"
+    status: str = "queued"            # queued / processing / ready / failed
     prompt: str | None = None
     lyrics: str | None = None
     instrumental: bool = False
@@ -56,7 +72,7 @@ class GenerationResponse(BaseModel):
     bpm: int | None = None
     key: str | None = None
     time_signature: str | None = None
-    audio_url: str | None = None
+    audio_url: str | None = None      # 未完成时为 None，前端据此禁用播放
     cover_color: str | None = None
     cover_icon: str | None = None
     cover_image_url: str | None = None
@@ -70,24 +86,31 @@ class GenerationResponse(BaseModel):
 
 
 class GenerationDetailResponse(GenerationResponse):
+    """作品详情 = 作品基础信息 + 五阶段进度列表。"""
     stages: list[StageResponse] = Field(default_factory=list)
 
 
 class LLMTaskRequest(BaseModel):
+    """POST /api/llm 请求体：供「AI 扩写描述 / 生成歌词 / 起标题」三个按钮复用。"""
+
     task: LLMTask
-    seed_prompt: str
-    instrumental: bool = False
+    seed_prompt: str                 # 用户已输入的描述，作为扩写种子
+    instrumental: bool = False       # 纯音乐时不会要求生成人声歌词
     style_tags: list[str] = Field(default_factory=list)
 
 
 class LLMTaskResponse(BaseModel):
+    """POST /api/llm 响应体；前端只取 ``output`` 回填到对应输入框。"""
+
     task: str
     output: str
-    provider: str
+    provider: str                    # 便于排查：real / mock 等
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class HealthResponse(BaseModel):
+    """GET /health 响应体；前端据此显示「后端已连接 / 演示模式」。"""
+
     status: str
     app: str
     mock_mode: bool

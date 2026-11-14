@@ -1,4 +1,11 @@
-/** 中文文案、时间/文本格式化、封面占位配色与图标（Vue 组件） */
+/**
+ * 中文文案、时间/文本格式化、封面占位配色与图标（纯展示逻辑，无请求、无状态）。
+ *
+ * statusText / statusTheme 覆盖后端四种状态及其历史别名（pending / running /
+ * completed / error），新增状态值时记得同时补这两个映射。
+ * paletteFor 用 id 做确定性哈希选色，与后端 cover_theme.compute_theme 同理，
+ * 保证同一首歌每次刷新看到的封面一致。
+ */
 import type { Component } from "vue";
 import {
   AiMusicIcon,
@@ -13,6 +20,7 @@ import {
 
 import type { GenerationResponse } from "@/interface";
 
+/** 状态中文文案；key 同时包含后端四种标准值与历史别名，保证旧数据不显示英文原值 */
 export const statusText: Record<string, string> = {
   queued: "排队中",
   pending: "排队中",
@@ -86,6 +94,7 @@ export function truncateText(value?: string | null, max = 48, fallback = "未命
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/** 卡片与详情页的「BPM · 调式 · 拍号 · 时长」摘要，缺字段时用「自动」兜底 */
 export function formatMetaLine(
   item: Pick<GenerationResponse, "bpm" | "key" | "time_signature" | "duration_seconds">,
 ): string {
@@ -109,6 +118,7 @@ const ICON_MAP: Record<string, Component> = {
   cloud: CloudIcon,
 };
 
+/** 封面渐变色板；按 id 哈希取色，改条目数量会影响所有旧作品的封面外观 */
 const COVER_PALETTE: Array<{ from: string; to: string; icon: string }> = [
   { from: "#8b5cf6", to: "#4c1d95", icon: "music" },
   { from: "#f472b6", to: "#be185d", icon: "heart" },

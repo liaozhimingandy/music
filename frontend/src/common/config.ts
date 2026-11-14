@@ -1,4 +1,7 @@
-/** 运行期配置：统一读取 Vite 环境变量，避免在业务代码里散落 import.meta.env */
+/**
+ * 运行期配置：统一读取 Vite 环境变量，避免在业务代码里散落 import.meta.env。
+ * 新增环境变量时，同时在 src/env.d.ts 声明类型、在 .env.* 提供默认值。
+ */
 export const config = {
   /** 后端接口前缀：开发环境走 Vite 代理，生产可配置为完整域名 */
   API_BASE_URL: import.meta.env.VITE_APP_API_BASE_URL || "/api",
