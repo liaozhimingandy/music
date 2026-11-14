@@ -1,26 +1,18 @@
-from fastapi import APIRouter, HTTPException, Query
+"""POST /api/llm：前端「AI 扩写描述 / 写词 / 起标题」。"""
 
-from ..schemas.llm import LLMTaskRequest, LLMTaskResponse
-from ..services.llm import llm_service
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException
+
+from ..models import LLMTaskRequest, LLMTaskResponse
+from ..services.runtime import get_llm_service
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])
 
 
 @router.post("", response_model=LLMTaskResponse)
-async def run_llm_task(payload: LLMTaskRequest) -> LLMTaskResponse:
-    return await llm_service.run(payload)
-
-
-@router.get("/models", response_model=list[str])
-async def list_llm_models(
-    endpoint: str | None = Query(default=None),
-    api_key: str | None = Query(default=None),
-) -> list[str]:
+def run_llm_task(payload: LLMTaskRequest) -> LLMTaskResponse:
     try:
-        return await llm_service.list_openai_models(
-            endpoint=endpoint,
-            api_key=api_key,
-            require_enabled=False,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return get_llm_service().run(payload)
+    except Exception as exc:  # noqa: BLE001 - 统一转成可展示的 502
+        raise HTTPException(status_code=502, detail=f"LLM 调用失败：{exc}") from exc

@@ -2,7 +2,7 @@
 
 > 项目名称：**Music Studio**（原名 ACE-Step Studio）。ACE-Step 1.5 仅作为底层生成引擎依赖保留，不再是项目名。
 
-本地优先的 AI 音乐创作工作台。后端基于 FastAPI 编排 ACE-Step 1.5 的生成任务，前端是一个中文 Vue 3 单页应用，提供「描述想法 → 生成歌曲 → 作品库 → 播放」的完整流程，数据（SQLite + 音频/封面文件）都留在本机。
+本地优先的 AI 音乐创作工作台。后端基于 FastAPI + SQLite3，按 `service → dal → model` 分层编排五阶段 MusicFlow（策划 → 歌词 → 润色 → 音乐制作方案 → 音频生成），调用 OpenAI 兼容 LLM 与 ModelScope ACE-Step 1.5 云端推理；前端是中文 Vue 3 单页应用，提供「描述想法 → 生成歌曲 → 作品库 → 播放」的完整流程，数据（SQLite + 音频文件）都留在本机。
 
 ## 当前状态
 
@@ -12,6 +12,7 @@
 - 文件布局参考 `vue_tuiwen`：`common/ interface/ services/ pages/ components/` 分层，`@` 路径别名，`.env.*` 环境变量，三份 tsconfig。
 - 请求层统一走 **axios 封装**（`src/services/index.ts`），带请求/响应拦截器与错误归一化；后端离线时自动降级到演示数据。
 - **GitHub Pages 部署自动化**：push 到 `main` 即自动构建并发布前端静态站。
+- 后端按 **routers → service → dal → model** 分层，`POST /api/generations` 立即返回 `queued`，后台线程跑五阶段并逐阶段写 SQLite，前端 2 秒轮询 `/api/history` 即可看到进度；阶段产物落盘支持断点续跑。
 - 默认端口：后端 `8788`，前端 `5175`（刻意避开 8000）。
 
 ## 快速开始
@@ -32,14 +33,21 @@ npm run build          # 类型检查 + vite build
 npm run preview        # http://localhost:5175，同样代理 /api 到 8788
 ```
 
-启动后端（需要 Python 3.11/3.12、ACE-Step 仓库与模型权重）：
+启动后端（Python 3.10+，**不需要本地模型权重**，只需 `.env` 里的云端 API 密钥）：
 
 ```bash
-./scripts/install_windows.ps1     # Windows，一次性安装
-./scripts/start.bat               # Windows，启动
-./scripts/install_mac.sh          # macOS，一次性安装
-./scripts/start.sh                # macOS，启动
+# 一次性安装
+python -m venv backend/.venv
+backend/.venv/Scripts/python.exe -m pip install -e backend   # Windows（macOS/Linux 用 backend/.venv/bin/pip）
+cp backend/app/.env.example backend/app/.env                  # 填入 LLM / ModelScope 密钥
+
+# 启动（仓库根目录）
+backend/.venv/Scripts/uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
 ```
+
+只想看效果、不消耗 API 额度：设置 `MUSIC_STUDIO_MOCK=true` 启动，全流程离线跑通并生成可播放的本地 WAV。也可用 `scripts/start.bat` / `scripts/start.sh` 一次启动前后端。
+
+离线端到端验证：`backend/.venv/Scripts/python.exe backend/tests/smoke_test.py`。
 
 完整步骤见 [安装指南](./docs/installation.md)，接口说明见 [后端接口清单](./docs/api.md)。
 
@@ -114,6 +122,33 @@ frontend/
 
 所有业务请求传 `silent: true`，避免后端离线（本地预览 / Pages）时全局错误提示不断弹出；业务错误（4xx）仍会原样抛给调用方。
 
+## 后端结构
+
+```text
+backend/app/
+├── main.py             # FastAPI 入口：lifespan 建表、CORS、路由
+├── config.py           # 配置（密钥只在被忽略的 .env）
+├── constants.py        # 阶段名、产物名、状态码
+├── routers/            # 接口层：history / generations / llm / meta
+├── services/           # 业务层
+│   ├── runtime.py          # 单例装配 + 后台线程池
+│   ├── song_service.py     # 作品 CRUD、前端响应映射、提交任务
+│   ├── llm_service.py      # 描述扩写 / 写词 / 起标题
+│   ├── workflow_service.py # 五阶段编排、进度落库、断点续跑
+│   ├── stage_steps.py      # 五个可复用阶段函数（纯逻辑）
+│   ├── prompt_manager.py   # Jinja2 渲染 prompts/（只读）
+│   ├── llm_client.py       # httpx OpenAI 兼容客户端 + 离线 mock
+│   ├── music_provider.py   # ModelScope 提交 / 轮询 / 下载 + 离线 mock
+│   └── cover_theme.py      # 封面配色
+├── dal/                # 数据访问层：SQLite3 + 阶段产物文件
+│   └── database.py / song_dal.py / stage_dal.py / artifact_dal.py
+├── models/             # 模型层：表结构 / 实体 / API Schema
+│   └── db_schema.py / entities.py / schemas.py
+└── prompts/            # 四阶段提示词（业务资产，代码只读取不修改）
+```
+
+数据库 `data/music_studio.db`：`songs`（按前端 `GenerationResponse` 字段建模）+ `song_stages`（五阶段进度，外键级联删除）。详见 [后端接口清单](./docs/api.md)。
+
 ## 环境变量
 
 | 变量 | 开发默认 | 说明 |
@@ -127,7 +162,7 @@ frontend/
 
 ```text
 .
-├── backend/            # FastAPI：生成编排、配置、LM 服务、SQLite
+├── backend/            # FastAPI：service→dal→model 三层 + SQLite3
 ├── frontend/           # 中文单页前端（Vue 3）
 ├── docs/               # 安装指南、接口清单、截图
 ├── scripts/            # 各平台安装与启动脚本
@@ -138,12 +173,17 @@ frontend/
 
 ## 配置项（后端）
 
+配置集中在 `backend/app/config.py`，模板为 `backend/app/.env.example`；真实密钥放 `backend/app/.env`（已忽略）。
+
 | 变量 | 用途 |
 | --- | --- |
-| `ACE_STEP_HOST` | 绑定地址（可设为 Tailscale IP 限制访问） |
-| `ACE_STEP_PORT` / `ACE_STEP_UI_PORT` | 后端 / 前端端口 |
-| `ACE_STEP_ACE_REPO_PATH` / `ACE_STEP_CHECKPOINTS_PATH` | ACE 仓库与权重位置 |
-| `ACE_STEP_OPENAI_ENABLED` + `ACE_STEP_OPENAI_ENDPOINT` | OpenAI 兼容端点，用于描述扩写、写词、起标题 |
+| `OPENAIM_API_KEY` | LLM Key，兼容 `OPENAI_API_KEY` / `LLM_API_KEY` |
+| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_CA_CERT` | OpenAI 兼容端点、模型、可选自签 CA |
+| `MUSIC_API_TOKEN` | ModelScope token（**只放 .env**） |
+| `MUSIC_API_BASE_URL` / `MUSIC_MODEL` | 生成接口与模型 |
+| `MUSIC_STUDIO_MOCK` | `true` 时全流程离线演示，不调用外部 API |
+| `ACE_STEP_HOST` / `ACE_STEP_PORT` | 绑定地址 / 端口（启动脚本沿用） |
+| `MUSIC_STUDIO_DATA_DIR` | 数据库与产物目录，默认 `<仓库根>/data` |
 
 ## 仓库
 
@@ -158,12 +198,13 @@ GitHub Pages 的 base 路径由 CI 按 `github.event.repository.name` 自动注�
 
 ## 开发备注
 
-- `.gitignore` 中的 `models/`、`data/` 已收窄为「仅仓库根目录」，避免误伤源码目录 `backend/app/models/` 与 `frontend/src/` 下的文件；另外忽略 `*.egg-info/` 生成物与 `.env.local` 私有变量。
-- `backend/app/models/`（SQLAlchemy `Generation` ORM）曾因上述忽略规则未被提交，已按 `egg-info/SOURCES.txt` 记录的结构补回，否则后端启动会 ImportError。
+- `.gitignore` 中的 `models/`、`data/` 已收窄为「仅仓库根目录」，避免误伤源码目录 `backend/app/models/` 与 `frontend/src/` 下的文件；另外忽略 `.env`、`.venv/`、`*.egg-info/`、`backend/app/outputs/`、`.ipynb_checkpoints/` 等产物。
+- 后端已从「本地 ACE-Step 引擎 + SQLAlchemy」整体替换为「云端 LLM + ModelScope + 原生 sqlite3」的 `service → dal → model` 三层；原型脚本 `music.py` 与旧引擎代码已删除，`prompts/` 内容保持原样只读。
 - 类型检查用 `vue-tsc --noEmit -p tsconfig.app.json`，不会生成 `vite.config.js` / `*.tsbuildinfo` 等产物污染工作树（Vite 会优先读取 `.js` 配置，曾与 `.ts` 配置冲突）。
 - `.env.development` / `.env.production` 是可提交的模板配置（不含密钥）；本地私密变量请放 `.env.local`（已被忽略）。
 
 ## 文档
 
 - [安装指南](./docs/installation.md)
-- [后端接口清单](./docs/api.md) — 已实现 17 个、前端当前调用 6 个、建议补充 7 个
+- [后端接口清单](./docs/api.md) — 8 个接口、前端调用 5 个、五阶段流程与 SQLite 表结构
+- [后端说明](./backend/README.md) — 分层、运行、离线演示与冒烟测试

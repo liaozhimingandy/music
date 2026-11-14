@@ -1,3 +1,5 @@
-from . import config, generate, history, llm
+"""FastAPI 路由层：只做参数校验与响应组装，业务逻辑一律下沉到 service。"""
 
-__all__ = ["config", "generate", "history", "llm"]
+from . import generations, history, llm, meta
+
+__all__ = ["generations", "history", "llm", "meta"]

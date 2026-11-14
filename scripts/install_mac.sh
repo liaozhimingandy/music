@@ -1,94 +1,39 @@
 #!/usr/bin/env bash
+# Music Studio 一次性安装（macOS / Linux）
+# 云端推理后端不需要本地模型权重 / GPU / torch。
 set -euo pipefail
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PY_ENV="$ROOT_DIR/backend/.venv"
 NODE_DIR="$ROOT_DIR/frontend"
-ACE_REPO="${ACE_STEP_REPO_PATH:-$ROOT_DIR/../ACE-Step-1.5}"
+ENV_EXAMPLE="$ROOT_DIR/backend/app/.env.example"
+ENV_FILE="$ROOT_DIR/backend/app/.env"
 
-resolve_python311() {
-  if command -v python3.11 >/dev/null 2>&1; then
-    echo "python3.11"
-    return
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)"
-    if [ "$version" = "3.11" ]; then
-      echo "python3"
-      return
-    fi
-  fi
-  echo ""
-}
-
-PYTHON_BIN="$(resolve_python311)"
-if [ -z "$PYTHON_BIN" ]; then
-  echo "Python 3.11 is required by ACE-Step (found incompatible default python)."
-  echo "Install Python 3.11 and rerun."
-  echo "Example (Homebrew): brew install python@3.11"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "未找到 python3，请安装 Python 3.10+" >&2
   exit 1
 fi
 
-echo "==> Setting up Python 3.11 virtualenv at $PY_ENV (using $PYTHON_BIN)"
-"$PYTHON_BIN" -m venv "$PY_ENV"
-source "$PY_ENV/bin/activate"
-python -m pip install --upgrade pip
-python -m pip install "numpy<2"
-
-echo "==> Selecting torch build"
-echo "   1) Apple Silicon (M-series, mps)"
-echo "   2) NVIDIA/CUDA (CUDA 12.1 wheels)"
-echo "   3) CPU only"
-read -r -p "Choose accelerator [1/2/3, default 1]: " ACC_CHOICE
-ACC_CHOICE=${ACC_CHOICE:-1}
-case "$ACC_CHOICE" in
-  2)
-    echo "CUDA wheels are not supported by this macOS installer."
-    echo "Use option 1 (Apple Silicon) or option 3 (CPU only)."
-    exit 1
-    ;;
-  3)
-    python -m pip install torch torchvision torchaudio
-    ;;
-  *)
-    # On macOS, use the latest compatible wheels from PyPI rather than pinned legacy builds.
-    python -m pip install torch torchvision torchaudio
-    ;;
-esac
-
-if [ ! -d "$ACE_REPO" ]; then
-  read -r -p "ACE-Step repo not found at $ACE_REPO. Clone now? [Y/n] " CLONE_REPLY
-  CLONE_REPLY=${CLONE_REPLY:-Y}
-  if [[ "$CLONE_REPLY" =~ ^[Yy]$ ]]; then
-    git clone https://github.com/ace-step/ACE-Step-1.5 "$ACE_REPO"
-  else
-    echo "ACE-Step repo is required. Set ACE_STEP_REPO_PATH or clone manually."
-    exit 1
-  fi
+echo "==> 创建 Python 虚拟环境"
+if [[ ! -x "$PY_ENV/bin/python" ]]; then
+  "$PYTHON_BIN" -m venv "$PY_ENV"
 fi
 
-echo "==> Installing backend"
-python -m pip install -e "$ROOT_DIR/backend"
-python -m pip install -e "$ACE_REPO"
+echo "==> 安装后端依赖（FastAPI / httpx / Jinja2 / pydantic-settings）"
+"$PY_ENV/bin/python" -m pip install --upgrade pip
+"$PY_ENV/bin/python" -m pip install -e "$ROOT_DIR/backend"
 
-echo "==> Seeding runtime config"
-python <<'PY'
-from backend.app.runtime_config import update_runtime_config
-update_runtime_config(
-    lm_enabled=True,
-    default_model_variant="turbo",
-    base_inference_steps=32,
-    turbo_inference_steps=8,
-    shift_inference_steps=8,
-    image_generation_provider="none",
-    a1111_base_url="http://127.0.0.1:7860",
-)
-print("Runtime config initialized at data/runtime_config.json")
-PY
+echo "==> 安装前端依赖"
+(cd "$NODE_DIR" && npm install)
 
-deactivate
+if [[ ! -f "$ENV_FILE" ]]; then
+  cp "$ENV_EXAMPLE" "$ENV_FILE"
+  echo "==> 已生成 backend/app/.env，请填入 OPENAIM_API_KEY 与 MUSIC_API_TOKEN"
+else
+  echo "==> 已存在 backend/app/.env，保持不动"
+fi
 
-echo "==> Installing frontend dependencies"
-cd "$NODE_DIR"
-npm install
-
-echo "Install complete. Activate backend venv with 'source backend/.venv/bin/activate'."
+echo ""
+echo "安装完成。运行 scripts/start.sh 启动前后端。"
+echo "只想离线预览：在 backend/app/.env 里设置 MUSIC_STUDIO_MOCK=true"

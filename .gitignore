@@ -1,10 +1,17 @@
 # Python
+.venv/
 backend/.venv/
 *.egg-info/
 __pycache__/
 *.pyc
 .pytest_cache/
 .mypy_cache/
+.ipynb_checkpoints/
+
+# 运行时产物（sqlite3 数据库、任务阶段文件、生成的音频）
+backend/app/outputs/
+backend/app/data/
+backend/tests/.tmp/
 
 # Node
 frontend/node_modules/

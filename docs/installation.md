@@ -1,204 +1,94 @@
-# Installation Guide (Beginner-Friendly)
+# 安装与运行指南
 
-This guide is for someone with minimal technical experience.
+Music Studio 由「Vue 3 前端 + FastAPI 后端」组成。后端调用云端 LLM 与 ModelScope ACE-Step 推理，**不需要下载本地模型权重、不需要 GPU**。
 
-## Quick Install (Fast Path)
+## 环境要求
 
-Use this if you just want to run it quickly.
+| 组件 | 版本 | 用途 |
+| --- | --- | --- |
+| Node.js | 18+ | 前端构建 / 开发服务器 |
+| Python | 3.10+ | FastAPI 后端 |
+| 云端密钥 | — | LLM 的 `OPENAIM_API_KEY`、ModelScope 的 `MUSIC_API_TOKEN` |
 
-### macOS
+## 只看界面（无需 Python / 无需密钥）
 
 ```bash
-git clone https://github.com/<your-user>/<your-repo>.git
-cd ACE
-./scripts/install_mac.sh
-./scripts/start.sh
+cd frontend
+npm install
+npm run dev       # http://localhost:5175
 ```
 
-Open: http://localhost:5175
+后端没启动时前端会自动进入**演示模式**，界面与生成流程都能预览。
 
-### Windows (PowerShell)
+## 安装后端（Windows）
+
+在仓库根目录执行：
 
 ```powershell
-git clone https://github.com/<your-user>/<your-repo>.git
-cd ACE
-./scripts/install_windows.ps1
-./scripts/start.bat
+python -m venv backend/.venv
+backend/.venv/Scripts/python.exe -m pip install -e backend
+Copy-Item backend/app/.env.example backend/app/.env
+notepad backend/app/.env     # 填入 OPENAIM_API_KEY 与 MUSIC_API_TOKEN
 ```
 
-Open: http://localhost:5175
-
-If this fails, continue with the full steps below.
-
----
-
-## Requirements
-
-Install these first:
-- Git
-- Node.js LTS (includes npm)
-- Python **3.11 x64**
-
-Optional but recommended:
-- NVIDIA GPU drivers/CUDA (Windows, if you want CUDA acceleration)
-
-Important:
-- Use Python 3.11 for this project.
-- Do not use Python 3.13.
-
----
-
-## 1. Get the Project Files
-
-Open Terminal (macOS) or PowerShell (Windows), then run:
+## 安装后端（macOS / Linux）
 
 ```bash
-git clone https://github.com/<your-user>/<your-repo>.git
-cd ACE
+python3 -m venv backend/.venv
+backend/.venv/bin/pip install -e backend
+cp backend/app/.env.example backend/app/.env
+$EDITOR backend/app/.env     # 填入密钥
 ```
 
-If your repo name is not `ACE`, use the folder name that was created.
+> `.env` 已被 `.gitignore` 忽略，不要提交密钥。未配置 LLM Key 时，扩写/写词/起标题会返回本地兜底文本；未配置 `MUSIC_API_TOKEN` 时音频生成会自动切到离线 mock。
 
----
-
-## 2. Install on macOS
-
-Inside the project folder:
+## 启动
 
 ```bash
-./scripts/install_mac.sh
+# 后端（仓库根目录）
+backend/.venv/Scripts/uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788   # Windows
+# backend/.venv/bin/uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788     # macOS / Linux
+
+# 前端（另一个终端）
+cd frontend && npm run dev
 ```
 
-When prompted for accelerator:
-- `1` = Apple Silicon (recommended for M-series Macs)
-- `3` = CPU-only fallback
+Windows 可用 `scripts/start.bat`、macOS/Linux 用 `scripts/start.sh` 一次启动两端。
 
----
+打开 http://localhost:5175 。后端交互文档在 http://localhost:8788/docs ，健康检查在 `/health`。
 
-## 3. Install on Windows
+## 离线演示模式
 
-Inside the project folder in PowerShell:
-
-```powershell
-./scripts/install_windows.ps1
-```
-
-When prompted for accelerator:
-- `2` = NVIDIA CUDA
-- `1` or `3` = CPU fallback
-
-If installer says Python 3.11 is missing:
-- Install Python 3.11 x64
-- Close and reopen PowerShell
-- Run installer again
-
----
-
-## 4. Start the App
-
-macOS:
+不消耗任何 API 额度即可跑通完整五阶段流程（本地合成 8 秒 WAV，前端可播放）：
 
 ```bash
-./scripts/start.sh
+MUSIC_STUDIO_MOCK=true backend/.venv/Scripts/uvicorn app.main:app --app-dir backend --port 8788
 ```
 
-Windows:
+也可把 `MUSIC_STUDIO_MOCK=true` 写进 `backend/app/.env`。
 
-```powershell
-./scripts/start.bat
-```
-
-Open in browser:
-- UI: http://localhost:5175
-- Backend health: http://localhost:8788/health
-
----
-
-## 5. Point to Existing ACE Models (Optional)
-
-If models are already downloaded elsewhere, set env vars before start.
-
-macOS:
+## 验证
 
 ```bash
-ACE_STEP_ACE_REPO_PATH="/path/to/ACE-Step-1.5" \
-ACE_STEP_CHECKPOINTS_PATH="/path/to/ACE-Step-1.5/checkpoints" \
-./scripts/start.sh
+backend/.venv/Scripts/python.exe backend/tests/smoke_test.py   # Windows
+# backend/.venv/bin/python backend/tests/smoke_test.py         # macOS / Linux
 ```
 
-Windows PowerShell:
+该测试使用临时数据库 + mock 模式，覆盖建表、LLM 三任务、创建作品、五阶段推进、音频下载与级联删除。
 
-```powershell
-$env:ACE_STEP_ACE_REPO_PATH="C:\path\to\ACE-Step-1.5"
-$env:ACE_STEP_CHECKPOINTS_PATH="C:\path\to\ACE-Step-1.5\checkpoints"
-./scripts/start.bat
-```
+## 数据与重置
 
----
+- 数据库：`data/music_studio.db`
+- 阶段产物与音频：`data/outputs/<作品ID>/`
+- 重置全部数据：停止服务后删除 `data/` 目录即可，下次启动自动重建。
 
-## 6. First-Run Inside the App
+## 常见问题
 
-1. Open Settings.
-2. Verify model paths and providers.
-3. Download/select required models if missing.
-4. Generate a short test song.
-
----
-
-## 7. Clean Reset (If Needed)
-
-This removes local DB/runtime/media cache.
-
-macOS:
-
-```bash
-rm -rf ./data
-```
-
-Windows PowerShell:
-
-```powershell
-Remove-Item -Recurse -Force .\data
-```
-
----
-
-## 8. Common Problems and Fixes
-
-### Python version error
-Install Python 3.11 x64 and rerun installer.
-
-### Torch install fails
-Rerun installer and pick the correct accelerator option.
-
-### Backend starts but songs fail instantly
-Rerun install once in a clean terminal to restore missing dependencies.
-
-### Frontend says proxy/backend error
-Confirm backend is running on port `8788` and not blocked by another process.
-
----
-
-## 9. Optional Network Binding (Tailscale/LAN)
-
-To bind both backend/frontend to a specific IP:
-
-macOS:
-
-```bash
-ACE_STEP_HOST=100.101.132.71 ./scripts/start.sh
-```
-
-Windows PowerShell:
-
-```powershell
-$env:ACE_STEP_HOST="100.101.132.71"
-./scripts/start.bat
-```
-
----
-
-If you get stuck, share:
-- OS version
-- Python version (`python --version`)
-- The full install/start error text
+| 现象 | 处理 |
+| --- | --- |
+| 前端显示「演示模式」 | 后端 8788 未启动；或 Vite 的 `/api` 代理目标不对（见 `frontend/vite.config.ts`） |
+| 创建作品后一直「生成中」 | 查看后端日志；`GET /api/generations/{id}/stages` 可看卡在哪个阶段 |
+| 状态变「生成失败」 | 读 `error_message`；常见原因是密钥无效、网络超时、模型返回非 JSON |
+| 想中断后继续 | `data/outputs/<id>/` 下的阶段 JSON 会跳过重跑；音乐任务 `music_task.json` 保存了 `task_id` |
+| 端口冲突 | 改 `ACE_STEP_PORT`，或前端开发服务器加 `--port 5177` |
+| Pages 线上页面无法生成 | 纯静态托管没有后端，页面按设计进入演示模式 |
