@@ -1,7 +1,11 @@
-"""dal 层：任务产物（阶段 JSON / 文本 / 音频）的文件存取。
+"""dal 层：任务产物（阶段 JSON / 文本 / 音频）的文件存取（全异步）。
 
 原子写入（临时文件 + replace）避免进程中断留下半截 JSON；
 阶段产物存在即可跳过重跑，这是断点续跑的依据。
+
+文件 IO 通过 ``asyncio.to_thread`` 放到线程池执行：单次读写只有几 KB，
+但音频可达数百 KB，同步写会阻塞 event loop 上所有正在轮询的请求。
+公开方法全部为 async；``__init__`` 与 ``audio_path`` 是纯路径计算，保持同步。
 
 目录约定：``data/outputs/<song_id>/``，文件名由 constants.STAGE_OUTPUTS 定义。
 该目录已被 .gitignore 忽略，属于运行产物而非源码。
@@ -9,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -39,38 +44,58 @@ class ArtifactStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def save_text(self, content: str, filename: str) -> Path:
-        """写入 UTF-8 文本，返回落盘路径。"""
+    # ---------------- 同步实现（只由 to_thread 调用） ----------------
+
+    def _save_text_sync(self, content: str, filename: str) -> Path:
         path = self._path(filename)
         path.write_text(content, encoding="utf-8")
         return path
 
-    def load_text(self, filename: str) -> str:
-        """读取 UTF-8 文本；文件不存在时由 Path 抛出 FileNotFoundError。"""
+    def _load_text_sync(self, filename: str) -> str:
         return self._path(filename).read_text(encoding="utf-8")
 
-    def save_json(self, data: Any, filename: str) -> Path:
-        """原子写入 JSON：先写 .tmp 再 replace，避免中断产生半截文件。
-
-        这是断点续跑能信任产物文件的前提——只要文件存在，内容必然完整。
-        """
+    def _save_json_sync(self, data: Any, filename: str) -> Path:
+        """原子写入：先写 .tmp 再 replace，文件存在就必然内容完整。"""
         path = self._path(filename)
         temp = path.with_suffix(path.suffix + ".tmp")
         temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(path)
         return path
 
-    def load_json(self, filename: str) -> Any:
-        """读取并解析阶段 JSON；缺失时明确报错，由调用方决定是否重跑。"""
+    def _load_json_sync(self, filename: str) -> Any:
         path = self._path(filename)
         if not path.exists():
             raise FileNotFoundError(path)
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def exists(self, filename: str) -> bool:
-        """产物是否已落盘——WorkflowService 用它判断该阶段能否跳过。"""
+    def _exists_sync(self, filename: str) -> bool:
         return (self.task_dir / filename).is_file()
 
+    # ---------------- 异步公开接口 ----------------
+
+    async def save_text(self, content: str, filename: str) -> Path:
+        """写入 UTF-8 文本，返回落盘路径。"""
+        return await asyncio.to_thread(self._save_text_sync, content, filename)
+
+    async def load_text(self, filename: str) -> str:
+        """读取 UTF-8 文本；文件不存在时由 Path 抛出 FileNotFoundError。"""
+        return await asyncio.to_thread(self._load_text_sync, filename)
+
+    async def save_json(self, data: Any, filename: str) -> Path:
+        """原子写入 JSON（见 _save_json_sync），是断点续跑能信任产物的前提。"""
+        return await asyncio.to_thread(self._save_json_sync, data, filename)
+
+    async def load_json(self, filename: str) -> Any:
+        """读取并解析阶段 JSON；缺失时明确报错，由调用方决定是否重跑。"""
+        return await asyncio.to_thread(self._load_json_sync, filename)
+
+    async def exists(self, filename: str) -> bool:
+        """产物是否已落盘——WorkflowService 用它判断该阶段能否跳过。"""
+        return await asyncio.to_thread(self._exists_sync, filename)
+
     def audio_path(self, suffix: str = ".wav") -> Path:
-        """最终音频的目标路径，文件名由 constants.FINAL_AUDIO_NAME 统一定义。"""
+        """最终音频的目标路径，文件名由 constants.FINAL_AUDIO_NAME 统一定义。
+
+        只做路径拼接，不触碰文件系统，故无需异步化。
+        """
         return self._path(f"{FINAL_AUDIO_NAME}{suffix}")

@@ -41,6 +41,8 @@ $EDITOR backend/app/.env     # 填入密钥
 ```
 
 > `.env` 已被 `.gitignore` 忽略，不要提交密钥。未配置 LLM Key 时，扩写/写词/起标题会返回本地兜底文本；未配置 `MUSIC_API_TOKEN` 时音频生成会自动切到离线 mock。
+>
+> `pip install -e backend` 会一并装好 `aiosqlite`（异步 SQLite 驱动）、`httpx`、`Jinja2` 等 8 个轻量依赖，不需要 torch / CUDA / 本地模型权重。后端全链路异步，单进程 uvicorn 即可并发处理轮询与后台生成任务。
 
 ## 启动
 
@@ -74,7 +76,7 @@ backend/.venv/Scripts/python.exe backend/tests/smoke_test.py   # Windows
 # backend/.venv/bin/python backend/tests/smoke_test.py         # macOS / Linux
 ```
 
-该测试使用临时数据库 + mock 模式，覆盖建表、LLM 三任务、创建作品、五阶段推进、音频下载与级联删除。
+该测试使用临时数据库 + mock 模式，52 项断言覆盖建表与旧库补列、UUIDv7 单调性、LLM 三任务、全异步五阶段、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 防护、音频下载与级联删除。
 
 ## 数据与重置
 
@@ -87,6 +89,8 @@ backend/.venv/Scripts/python.exe backend/tests/smoke_test.py   # Windows
 | 现象 | 处理 |
 | --- | --- |
 | 前端显示「演示模式」 | 后端 8788 未启动；或 Vite 的 `/api` 代理目标不对（见 `frontend/vite.config.ts`） |
+| 提交生成返回 429 | 触发了限流或活跃任务上限，稍后按 `Retry-After` 重试；阈值见 `backend/app/.env.example`（生产不建议关闭总开关） |
+| 重复点「开始生成」产生了两条 | 正常应命中幂等去重（响应带 `X-Deduplicated: true`）；确实要再生成一次可加 `?force=true` |
 | 创建作品后一直「生成中」 | 查看后端日志；`GET /api/generations/{id}/stages` 可看卡在哪个阶段 |
 | 状态变「生成失败」 | 读 `error_message`；常见原因是密钥无效、网络超时、模型返回非 JSON |
 | 想中断后继续 | `data/outputs/<id>/` 下的阶段 JSON 会跳过重跑；音乐任务 `music_task.json` 保存了 `task_id` |

@@ -5,6 +5,7 @@
 未配置 API Key 或开启 MUSIC_STUDIO_MOCK 时使用本地兜底，保证界面可用。
 
 前端对应位置：CreatePanel.vue 的「AI 扩写描述」按钮调用 POST /api/llm。
+``run`` 为 async，真实模式下 LLM 请求在 event loop 上等待，不阻塞其它接口。
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ def _local_fallback(payload: LLMTaskRequest) -> str:
     """无 API Key / mock 模式下的本地兜底输出，保证按钮永远有响应。
 
     刻意保持与前端约束一致：描述不超过 500 字、标题不超过 6 字、
-    纯音乐任务返回 ``[Instrumental]`` 而不是人声歌词。
+    纯音乐任务返回 ``[Instrumental]`` 而不是人声歌词。纯计算、无 IO。
     """
     seed = " ".join(payload.seed_prompt.split())
     if payload.task == "title":
@@ -66,7 +67,7 @@ class LLMService:
     """轻量 LLM 任务服务。
 
     Args:
-        llm: 可注入的 LLM 客户端，便于单测用 MockLLMClient 替换。
+        llm: 可注入的 async LLM 客户端，便于单测用 MockLLMClient 替换。
         config: 可注入的配置对象；缺省使用全局 settings。
     """
 
@@ -74,11 +75,17 @@ class LLMService:
         self.config = config or settings
         self.llm = llm or build_llm_client(self.config)
 
-    def run(self, payload: LLMTaskRequest) -> LLMTaskResponse:
+    async def aclose(self) -> None:
+        """释放 LLM 连接池；由 runtime.shutdown() 在应用关闭时调用。"""
+        closer = getattr(self.llm, "aclose", None)
+        if closer is not None:
+            await closer()
+
+    async def run(self, payload: LLMTaskRequest) -> LLMTaskResponse:
         """执行一个 LLM 任务，返回可直接回填到输入框的文本。
 
         降级策略：mock 模式或没有 API Key 时走 ``_local_fallback``，
-        响应 ``provider="local"``，前端无需区分；真实模式下调用 LLM
+        响应 ``provider="local"``，前端无需区分；真实模式下异步调用 LLM
         并去掉模型可能附加的代码围栏与引号。
         """
         if self.config.mock_mode or not self.config.llm_api_key:
@@ -90,7 +97,7 @@ class LLMService:
             )
 
         output = strip_code_fence(
-            self.llm.chat(
+            await self.llm.chat(
                 SYSTEM_PROMPTS[payload.task],
                 payload.seed_prompt,
                 temperature=TEMPERATURES[payload.task],

@@ -11,10 +11,19 @@
 * 作品状态只用前端认识的 ``queued / processing / ready / failed``；阶段状态
   用 ``pending / running / completed / failed``，两套枚举见 constants.py。
 
+去重与限流字段
+--------------
+``input_fingerprint`` 是请求内容的 sha256（或客户端 Idempotency-Key 的哈希），
+用于幂等去重；``client_key`` 是客户端 IP 的哈希，用于单客户端活跃任务上限。
+两者都是后加的列，故额外提供 ``SONG_TABLE_MIGRATIONS`` 让旧库平滑升级
+（``CREATE TABLE IF NOT EXISTS`` 不会改已有表）；依赖这两列的索引放在
+``POST_MIGRATION_SQL``，必须等 ALTER 完成后再建，否则旧库启动会失败。
+
 维护提示
 --------
-新增数据库字段时必须同步改两处：本文件的 ``SCHEMA_SQL`` 和 ``SONG_COLUMNS``。
-DAL 的 INSERT / UPDATE 以 ``SONG_COLUMNS`` 作字段白名单，漏加会静默丢数据。
+新增数据库字段时必须同步改四处：``SCHEMA_SQL``（新库）、
+``SONG_TABLE_MIGRATIONS``（旧库）、``SONG_COLUMNS``（DAL 字段白名单）、
+``entities.SongRecord``（实体）。漏掉白名单会静默丢数据。
 """
 
 from __future__ import annotations
@@ -50,6 +59,8 @@ CREATE TABLE IF NOT EXISTS songs (
     metadata_json     TEXT    NOT NULL DEFAULT '{}',
     provider_task_id  TEXT,
     source_prompt     TEXT,
+    input_fingerprint TEXT,           -- 请求指纹，幂等去重依据
+    client_key        TEXT,           -- 客户端标识哈希，单客户端限流依据
     created_at        TEXT    NOT NULL,
     updated_at        TEXT    NOT NULL
 );
@@ -70,6 +81,19 @@ CREATE TABLE IF NOT EXISTS song_stages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_stages_song ON song_stages(song_id);
+"""
+
+# 旧库补列映射（列名 -> 列类型）。init_schema() 会在建表后检查
+# PRAGMA table_info(songs)，缺哪列就 ALTER 哪列，保证升级不丢历史作品。
+SONG_TABLE_MIGRATIONS: dict[str, str] = {
+    "input_fingerprint": "TEXT",
+    "client_key": "TEXT",
+}
+
+# 依赖新列的索引必须在 ALTER 之后创建，否则旧库（尚无该列）会在启动时报错。
+POST_MIGRATION_SQL = """
+CREATE INDEX IF NOT EXISTS idx_songs_fingerprint ON songs(input_fingerprint, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_songs_client ON songs(client_key, status);
 """
 
 # DAL 插入 / 更新时使用的列白名单，顺序与 DDL 保持一致。
@@ -104,6 +128,9 @@ SONG_COLUMNS: tuple[str, ...] = (
     "metadata_json",     # JSON 字符串，实体里对应 metadata: dict
     "provider_task_id",  # ModelScope 侧的任务 ID，用于查询生成状态
     "source_prompt",
+    # --- 幂等与接口防护 ---
+    "input_fingerprint",  # 请求内容 sha256 / Idempotency-Key 哈希
+    "client_key",         # 客户端 IP 哈希（不存明文）
     # --- 时间戳（ISO 8601 UTC 字符串）---
     "created_at",
     "updated_at",

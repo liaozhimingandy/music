@@ -54,6 +54,8 @@ class SongRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     provider_task_id: str | None = None
     source_prompt: str | None = None  # 用户最初输入，五个阶段共用
+    input_fingerprint: str | None = None  # 请求指纹；幂等去重依据，不返回给前端
+    client_key: str | None = None         # 客户端 IP 哈希；单客户端限流依据，不返回给前端
     created_at: str = ""
     updated_at: str = ""
 

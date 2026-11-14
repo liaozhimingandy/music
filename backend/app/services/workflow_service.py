@@ -1,6 +1,6 @@
-"""service 层：MusicFlow 编排器。
+"""service 层：MusicFlow 编排器（全异步）。
 
-把五个阶段串成后台任务：逐阶段落盘 + 写 SQLite 进度 + 更新作品字段。
+把五个阶段串成后台 asyncio 任务：逐阶段落盘 + 写 SQLite 进度 + 更新作品字段。
 任一阶段失败都会把作品置为 failed 并保留已完成阶段的产物，便于续跑。
 
 前端体验链路：POST 返回 ``queued`` -> 本服务置 ``processing`` 并逐阶段
@@ -9,6 +9,9 @@
 
 续跑约定：阶段产物 JSON 存在即视为该阶段已完成（``_execute`` 直接复用），
 产物损坏则重新执行该阶段。因此清理 ``data/outputs/<song_id>/`` 会触发重跑。
+
+所有数据库与文件访问都 ``await``，等待 LLM / 远端音乐生成期间不会阻塞
+event loop；同一时刻能跑几个作品由 runtime 的 asyncio.Semaphore 控制。
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from ..config import settings
 from ..constants import (
@@ -50,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 def _extract_bpm(stage1: dict[str, Any]) -> int | None:
-    """从策划结果里尽量提取 BPM。
+    """从策划结果里尽量提取 BPM（纯计算，保持同步）。
 
     模型返回格式不固定：tempo 可能是 dict（含 bpm / value / range /
     description）、数字，或带数字的字符串（如 "88-92 BPM"）。这里按顺序
@@ -76,7 +79,7 @@ def _extract_bpm(stage1: dict[str, Any]) -> int | None:
 
 
 class WorkflowService:
-    """五阶段流程的执行器；由 runtime 的线程池调用 ``run(song_id)``。
+    """五阶段流程的执行器；由 runtime 的 ``asyncio.Task`` 调用 ``await run(song_id)``。
 
     所有依赖（DAL / LLM / 音乐提供方 / 模板）都可注入，冒烟测试正是用
     mock 客户端 + 临时目录跑通全流程而不联网。
@@ -99,24 +102,30 @@ class WorkflowService:
         self.provider = provider or build_music_provider(self.config)
         self.prompts = prompts or PromptManager(self.config.prompts_dir)
 
-    def run(self, song_id: str) -> None:
+    async def aclose(self) -> None:
+        """释放 LLM 的 httpx 连接池；由 runtime.shutdown() 在应用关闭时调用。"""
+        closer = getattr(self.llm, "aclose", None)
+        if closer is not None:
+            await closer()
+
+    async def run(self, song_id: str) -> None:
         """执行一首歌的完整流程；异常会先落库为 failed 再向上抛出。
 
         阶段之间还会把中间结果写回 songs 表：阶段三后更新最终标题与歌词，
         阶段四后更新风格描述、时长、BPM 与 metadata，阶段五后写音频路径
         并置为 ready。这样即使中途失败，作品库里也能看到已产出的内容。
         """
-        song = self.songs.get(song_id)
+        song = await self.songs.get(song_id)
         if song is None:
             raise KeyError(f"作品不存在：{song_id}")
 
         store = ArtifactStore(Path(self.config.outputs_dir) / song_id, resume=True)
         # 优先用落盘的原始输入（未被后续扩写覆盖），保证续跑时输入一致。
         user_input = song.prompt or song.source_prompt or song.title or ""
-        if store.exists(USER_INPUT_FILE):
-            user_input = store.load_text(USER_INPUT_FILE)
+        if await store.exists(USER_INPUT_FILE):
+            user_input = await store.load_text(USER_INPUT_FILE)
         else:
-            store.save_text(user_input, USER_INPUT_FILE)
+            await store.save_text(user_input, USER_INPUT_FILE)
 
         ctx = StageContext(
             llm=self.llm,
@@ -127,35 +136,36 @@ class WorkflowService:
             initial_title=song.title or "",
         )
         logger.info("开始 MusicFlow 任务：%s（输入 %s 字）", song_id, len(user_input))
-        self.songs.update(
+        await self.songs.update(
             song_id, status=STATUS_PROCESSING, current_stage=STAGE_PLANNING, error_message=None
         )
 
         try:
             # --- 阶段 1~3：策划 -> 歌词 -> 润色 ---
-            stage1 = self._execute(
+            # lambda 返回 coroutine，_execute 内部 await func() 即可。
+            stage1 = await self._execute(
                 ctx, song_id, STAGE_PLANNING,
                 lambda: run_planning(ctx, user_input), STAGE_LYRICS,
             )
-            stage2 = self._execute(
+            stage2 = await self._execute(
                 ctx, song_id, STAGE_LYRICS,
                 lambda: run_lyrics(ctx, stage1), STAGE_POLISH,
             )
-            polished = self._execute(
+            polished = await self._execute(
                 ctx, song_id, STAGE_POLISH,
                 lambda: run_polish(ctx, stage1, stage2), STAGE_MUSIC,
             )
 
             # 润色结果为准，覆盖前端提交的初始标题 / 歌词。
             final_song = polished["song"]
-            self.songs.update(
+            await self.songs.update(
                 song_id,
                 title=final_song.get("title") or song.title,
                 lyrics=flatten_lyrics(final_song.get("lyrics")),
             )
 
             # --- 阶段 4：音乐制作方案，回填展示字段 ---
-            plan = self._execute(
+            plan = await self._execute(
                 ctx, song_id, STAGE_MUSIC,
                 lambda: run_music_prompt(ctx, stage1, polished), STAGE_MUSIC_GENERATION,
             )
@@ -167,7 +177,7 @@ class WorkflowService:
                 "genre": analysis.get("genre") or [],
                 "mood": analysis.get("mood") or [],
             }
-            self.songs.update(
+            await self.songs.update(
                 song_id,
                 style_prompt=plan["music_prompts"]["style"],
                 duration_seconds=int(plan["ace_music_settings"]["duration_seconds"]),
@@ -176,12 +186,12 @@ class WorkflowService:
             )
 
             # --- 阶段 5：生成音频，作品转为 ready ---
-            result = self._execute(
+            result = await self._execute(
                 ctx, song_id, STAGE_MUSIC_GENERATION,
                 lambda: run_final_music(ctx, plan, instrumental=song.instrumental), None,
             )
             metadata["remote_audio_url"] = result.get("audio_url")
-            self.songs.update(
+            await self.songs.update(
                 song_id,
                 status=STATUS_READY,
                 current_stage=None,
@@ -191,52 +201,52 @@ class WorkflowService:
                 metadata=metadata,
             )
             logger.info("MusicFlow 任务完成：%s", song_id)
-        except Exception as exc:  # noqa: BLE001 - 统一落库后向上抛给线程日志
+        except Exception as exc:  # noqa: BLE001 - 统一落库后向上抛给任务日志
             logger.exception("MusicFlow 任务失败：%s", song_id)
-            self.songs.update(song_id, status=STATUS_FAILED, current_stage=None, error_message=str(exc))
+            await self.songs.update(song_id, status=STATUS_FAILED, current_stage=None, error_message=str(exc))
             raise
 
-    def _execute(
+    async def _execute(
         self,
         ctx: StageContext,
         song_id: str,
         stage: str,
-        func: Callable[[], dict[str, Any]],
+        func: Callable[[], Awaitable[dict[str, Any]]],
         next_stage: str | None,
     ) -> dict[str, Any]:
         """执行单个阶段，并负责断点续跑、进度落盘与异常标记。
 
-        流程：产物已存在且可解析 -> 直接复用；否则标记 running -> 调用
-        ``func()`` -> 原子写产物 -> 标记 completed -> 推进 current_stage。
+        流程：产物已存在且可解析 -> 直接复用；否则标记 running -> ``await``
+        阶段函数 -> 原子写产物 -> 标记 completed -> 推进 current_stage。
         任一异常先标记该阶段 failed 再抛出，由 ``run`` 统一置作品 failed。
         """
         output = STAGE_OUTPUTS[stage]
-        if ctx.store.exists(output):
+        if await ctx.store.exists(output):
             try:
-                cached = ctx.store.load_json(output)
+                cached = await ctx.store.load_json(output)
                 if isinstance(cached, dict):
                     logger.info("阶段已完成，跳过：%s", stage)
-                    self.stages.complete(song_id, stage)
-                    self._advance(song_id, next_stage)
+                    await self.stages.complete(song_id, stage)
+                    await self._advance(song_id, next_stage)
                     return cached
             except (ValueError, OSError, json.JSONDecodeError):
                 # 半截 / 损坏的 JSON 不能信任，重新跑这一阶段。
                 logger.warning("阶段产物损坏，重新执行：%s", stage)
 
         logger.info("开始执行阶段：%s", stage)
-        self.stages.start(song_id, stage)
-        self._advance(song_id, stage)
+        await self.stages.start(song_id, stage)
+        await self._advance(song_id, stage)
         try:
-            result = func()
-            ctx.store.save_json(result, output)
-            self.stages.complete(song_id, stage)
-            self._advance(song_id, next_stage)
+            result = await func()
+            await ctx.store.save_json(result, output)
+            await self.stages.complete(song_id, stage)
+            await self._advance(song_id, next_stage)
             return result
         except Exception as exc:  # noqa: BLE001
-            self.stages.fail(song_id, stage, str(exc))
+            await self.stages.fail(song_id, stage, str(exc))
             logger.error("阶段执行失败：%s，原因：%s", stage, exc)
             raise
 
-    def _advance(self, song_id: str, stage: str | None) -> None:
+    async def _advance(self, song_id: str, stage: str | None) -> None:
         """更新作品当前阶段；传 None 表示全部完成，前端不再显示进度。"""
-        self.songs.update(song_id, current_stage=stage)
+        await self.songs.update(song_id, current_stage=stage)

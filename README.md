@@ -12,7 +12,8 @@
 - 文件布局参考 `vue_tuiwen`：`common/ interface/ services/ pages/ components/` 分层，`@` 路径别名，`.env.*` 环境变量，三份 tsconfig。
 - 请求层统一走 **axios 封装**（`src/services/index.ts`），带请求/响应拦截器与错误归一化；后端离线时自动降级到演示数据。
 - **GitHub Pages 部署自动化**：push 到 `main` 即自动构建并发布前端静态站。
-- 后端按 **routers → service → dal → model** 分层，`POST /api/generations` 立即返回 `queued`，后台线程跑五阶段并逐阶段写 SQLite，前端 2 秒轮询 `/api/history` 即可看到进度；阶段产物落盘支持断点续跑。
+- 后端按 **routers → service → dal → model** 分层，**全链路异步**（asyncio + aiosqlite + httpx.AsyncClient）：`POST /api/generations` 立即返回 `queued`，后台 `asyncio.Task` 跑五阶段并逐阶段写 SQLite，前端 2 秒轮询 `/api/history` 看进度；服务通过 FastAPI `Depends` 注入，作品 ID 用时间有序的 **UUIDv7**。
+- 生成接口内置**幂等去重**（内容指纹 / `Idempotency-Key`，重复提交直接返回已有作品）与**接口防护**（滑动窗口限流、活跃任务上限、请求体大小、字段长度与路径 ID 白名单），防双击与恶意刷接口。
 - 默认端口：后端 `8788`，前端 `5175`（刻意避开 8000）。
 
 ## 快速开始
@@ -126,28 +127,31 @@ frontend/
 
 ```text
 backend/app/
-├── main.py             # FastAPI 入口：lifespan 建表、CORS、路由
+├── main.py             # FastAPI 入口：async lifespan 建表/清理、CORS、路由
 ├── config.py           # 配置（密钥只在被忽略的 .env）
 ├── constants.py        # 阶段名、产物名、状态码
-├── routers/            # 接口层：history / generations / llm / meta
-├── services/           # 业务层
-│   ├── runtime.py          # 单例装配 + 后台线程池
-│   ├── song_service.py     # 作品 CRUD、前端响应映射、提交任务
+├── ids.py              # UUIDv7 生成器（时间有序、同毫秒单调递增）
+├── deps.py             # FastAPI 依赖层：限流 / 请求体 / 客户端标识 / 路径校验
+├── routers/            # 接口层：async 端点 + Depends 注入服务
+├── services/           # 业务层（全部 async）
+│   ├── runtime.py          # 单例装配 + asyncio.Task / Semaphore 调度
+│   ├── song_service.py     # 作品 CRUD、响应映射、幂等去重、并发闸门
 │   ├── llm_service.py      # 描述扩写 / 写词 / 起标题
 │   ├── workflow_service.py # 五阶段编排、进度落库、断点续跑
-│   ├── stage_steps.py      # 五个可复用阶段函数（纯逻辑）
+│   ├── stage_steps.py      # 五个可复用阶段函数
 │   ├── prompt_manager.py   # Jinja2 渲染 prompts/（只读）
-│   ├── llm_client.py       # httpx OpenAI 兼容客户端 + 离线 mock
+│   ├── llm_client.py       # httpx.AsyncClient OpenAI 兼容客户端 + 离线 mock
 │   ├── music_provider.py   # ModelScope 提交 / 轮询 / 下载 + 离线 mock
+│   ├── rate_limiter.py     # 进程内滑动窗口限流
 │   └── cover_theme.py      # 封面配色
-├── dal/                # 数据访问层：SQLite3 + 阶段产物文件
+├── dal/                # 数据访问层：aiosqlite 长连接 + 产物文件（async）
 │   └── database.py / song_dal.py / stage_dal.py / artifact_dal.py
 ├── models/             # 模型层：表结构 / 实体 / API Schema
 │   └── db_schema.py / entities.py / schemas.py
 └── prompts/            # 四阶段提示词（业务资产，代码只读取不修改）
 ```
 
-数据库 `data/music_studio.db`：`songs`（按前端 `GenerationResponse` 字段建模）+ `song_stages`（五阶段进度，外键级联删除）。详见 [后端接口清单](./docs/api.md)。
+数据库 `data/music_studio.db`：`songs`（按前端 `GenerationResponse` 字段建模，另含 `input_fingerprint` / `client_key` 做幂等与限流）+ `song_stages`（五阶段进度，外键级联删除）。旧库启动时自动补列，历史数据不丢。详见 [后端接口清单](./docs/api.md)。
 
 ## 环境变量
 
@@ -184,6 +188,15 @@ backend/app/
 | `MUSIC_STUDIO_MOCK` | `true` 时全流程离线演示，不调用外部 API |
 | `ACE_STEP_HOST` / `ACE_STEP_PORT` | 绑定地址 / 端口（启动脚本沿用） |
 | `MUSIC_STUDIO_DATA_DIR` | 数据库与产物目录，默认 `<仓库根>/data` |
+| `MUSIC_STUDIO_RATE_LIMIT_ENABLED` | 接口防护总开关，默认 `true` |
+| `MUSIC_STUDIO_RATE_LIMIT_WINDOW` | 限流滑动窗口长度（秒），默认 `60` |
+| `MUSIC_STUDIO_RATE_LIMIT_READ` / `_LLM` / `_CREATE` | 各接口窗口内请求上限，默认 `180` / `20` / `5` |
+| `MUSIC_STUDIO_MAX_ACTIVE_JOBS` / `MUSIC_STUDIO_MAX_ACTIVE_PER_CLIENT` | 全局 / 单客户端活跃任务上限，默认 `4` / `2` |
+| `MUSIC_STUDIO_DEDUPE_WINDOW` | 已完成作品的重复提交窗口（秒），默认 `30` |
+| `MUSIC_STUDIO_MAX_REQUEST_BYTES` | 请求体上限（字节），默认 `65536` |
+| `MUSIC_STUDIO_TRUST_PROXY` | 是否信任 `X-Forwarded-For`，默认 `false` |
+
+完整默认值与注释见 `backend/app/.env.example`；生产环境请勿关闭防护总开关。
 
 ## 仓库
 
@@ -200,6 +213,7 @@ GitHub Pages 的 base 路径由 CI 按 `github.event.repository.name` 自动注�
 
 - `.gitignore` 中的 `models/`、`data/` 已收窄为「仅仓库根目录」，避免误伤源码目录 `backend/app/models/` 与 `frontend/src/` 下的文件；另外忽略 `.env`、`.venv/`、`*.egg-info/`、`backend/app/outputs/`、`.ipynb_checkpoints/` 等产物。
 - 后端已从「本地 ACE-Step 引擎 + SQLAlchemy」整体替换为「云端 LLM + ModelScope + 原生 sqlite3」的 `service → dal → model` 三层；原型脚本 `music.py` 与旧引擎代码已删除，`prompts/` 内容保持原样只读。
+- 后端已全量异步化：`asyncio.Task` + `Semaphore` 取代线程池，`aiosqlite` 单长连接 + 事务锁取代逐次开连接，`httpx.AsyncClient` 取代同步客户端；路由服务全部走 `Depends` 注入。作品 ID 改为 UUIDv7（时间有序，旧 UUIDv4 记录仍兼容），生成接口增加幂等去重与限流防护。详见 [后端说明](./backend/README.md) 的「异步与并发」章节。
 - 前后端源码已补齐维护注释：每个模块开头有职责说明，关键类 / 方法带 docstring 或 JSDoc，状态机、断点续跑、字段映射等易踩坑处有专门说明。后端的推荐阅读顺序与常见改动落点见 [后端说明](./backend/README.md)。
 - `backend/app/prompts/` 下的提示词模板是业务资产，本轮注释工作只读、未修改任何模板内容（8 个 md 文件校验值前后一致）。
 - 类型检查用 `vue-tsc --noEmit -p tsconfig.app.json`，不会生成 `vite.config.js` / `*.tsbuildinfo` 等产物污染工作树（Vite 会优先读取 `.js` 配置，曾与 `.ts` 配置冲突）。
@@ -208,5 +222,5 @@ GitHub Pages 的 base 路径由 CI 按 `github.event.repository.name` 自动注�
 ## 文档
 
 - [安装指南](./docs/installation.md)
-- [后端接口清单](./docs/api.md) — 8 个接口、前端调用 5 个、五阶段流程与 SQLite 表结构
+- [后端接口清单](./docs/api.md) — 8 个接口、幂等去重与限流规则、UUIDv7、五阶段流程与 SQLite 表结构
 - [后端说明](./backend/README.md) — 分层、运行、离线演示与冒烟测试

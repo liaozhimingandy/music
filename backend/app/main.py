@@ -3,11 +3,13 @@
 启动：``uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788``
 分层：``routers -> service -> dal -> model``（SQLite3）。
 
-应用生命周期（lifespan）：
-* 启动：``init_schema()`` 建表（幂等）并打印数据库路径；
-* 关闭：``runtime.shutdown()`` 释放生成任务线程池与 Service 单例。
+应用生命周期（async lifespan）：
+* 启动：``await init_schema()`` 建表 / 补列（幂等）并打印数据库路径；
+* 关闭：``await runtime.shutdown()`` 取消后台 asyncio 任务、释放
+  httpx 连接池与 Service 单例。
 
-接口清单见 docs/api.md；健康检查 /health 无需数据库即可访问。
+全链路异步：路由 -> service -> dal(aiosqlite) 均无阻塞 IO，等待 LLM /
+音乐生成时 event loop 仍可响应前端轮询。接口清单见 docs/api.md。
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .dal import init_schema
+from .dal import close_connection, init_schema
 from .routers import generations, history, llm, meta
 from .services import runtime
 
@@ -32,10 +34,12 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001 - FastAPI 约定的签名
     """启动建表、关闭清理；TestClient 进入 with 时也会走这里。"""
-    init_schema()
+    await init_schema()
     logging.getLogger(__name__).info("SQLite 数据库就绪：%s", settings.db_path)
     yield
-    runtime.shutdown()
+    # 先取消后台任务（它们可能还要写一次 failed 状态），最后才关数据库连接。
+    await runtime.shutdown()
+    await close_connection()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", debug=settings.debug, lifespan=lifespan)

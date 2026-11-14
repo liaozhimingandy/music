@@ -1,7 +1,11 @@
-"""dal 层：songs 表 CRUD，只做数据存取，不含业务判断。
+"""dal 层：songs 表 CRUD（全异步），只做数据存取，不含业务判断。
 
 所有 SQL 参数都走占位符绑定，字段来自 models.SONG_COLUMNS 白名单，
 因此 Service 传入的任意 kwargs 都不会拼出非预期列或注入 SQL。
+
+除基本 CRUD 外还提供给接口防护用的三个查询：
+``find_duplicate``（幂等去重）/ ``count_active``（全局并发上限）/
+``count_active_by_client``（单客户端并发上限）。
 """
 
 from __future__ import annotations
@@ -9,14 +13,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..constants import STATUS_PROCESSING, STATUS_QUEUED
 from ..models import SONG_COLUMNS, SongRecord
 from .database import connection, utc_now
 
 
 class SongDAL:
-    """作品表的数据访问对象；方法均返回实体，不返回 sqlite3.Row。"""
+    """作品表的数据访问对象；所有方法均为 async，返回实体而非 sqlite3.Row。"""
 
-    def create(self, record: SongRecord) -> SongRecord:
+    async def create(self, record: SongRecord) -> SongRecord:
         """插入一条新作品，并补齐创建 / 更新时间。
 
         ``to_row()`` 已把 bool、metadata 转成数据库可接受的类型；这里再按
@@ -28,32 +33,81 @@ class SongDAL:
         row = {key: value for key, value in record.to_row().items() if key in SONG_COLUMNS}
         columns = ", ".join(row)
         placeholders = ", ".join(f":{key}" for key in row)
-        with connection() as conn:
-            conn.execute(
+        async with connection() as conn:
+            await conn.execute(
                 f"INSERT INTO songs ({columns}) VALUES ({placeholders})",
                 row,
             )
         return record
 
-    def get(self, song_id: str) -> SongRecord | None:
+    async def get(self, song_id: str) -> SongRecord | None:
         """按 ID 查单条；不存在返回 None（由路由层转成 404）。"""
-        with connection() as conn:
-            row = conn.execute("SELECT * FROM songs WHERE id = ?", (song_id,)).fetchone()
+        async with connection() as conn:
+            cursor = await conn.execute("SELECT * FROM songs WHERE id = ?", (song_id,))
+            row = await cursor.fetchone()
+            await cursor.close()
         return SongRecord.from_row(row) if row else None
 
-    def list(self, limit: int = 25) -> list[SongRecord]:
+    async def list(self, limit: int = 25) -> list[SongRecord]:
         """按创建时间倒序列出作品，供 /api/history 渲染作品库。
 
         limit 钳制在 1~200，避免前端误传超大值拖慢接口；排序依赖
-        idx_songs_created_at 索引。
+        idx_songs_created_at 索引。路由层还会用 Query(le=100) 再校一次。
         """
-        with connection() as conn:
-            rows = conn.execute(
+        async with connection() as conn:
+            cursor = await conn.execute(
                 "SELECT * FROM songs ORDER BY created_at DESC LIMIT ?", (max(1, min(limit, 200)),)
-            ).fetchall()
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
         return [SongRecord.from_row(row) for row in rows]
 
-    def update(self, song_id: str, **fields: Any) -> SongRecord | None:
+    async def find_duplicate(self, fingerprint: str, since: str) -> SongRecord | None:
+        """查同一请求指纹下可复用的作品，用于幂等去重。
+
+        两类命中：
+        * 仍在 ``queued`` / ``processing`` 的任务 —— 无论过了多久都复用，
+          防止重复提交把同一个生成任务跑两遍、重复计费；
+        * 窗口内刚创建的任务（含 ready / failed）—— 防双击与网络重试，
+          窗口过后允许重新生成相同内容。
+
+        ``since`` 是 ISO 8601 UTC 字符串，与 created_at 同格式，可直接比较。
+        依赖 idx_songs_fingerprint 索引。
+        """
+        async with connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM songs WHERE input_fingerprint = ? "
+                "AND (status IN (?, ?) OR created_at >= ?) "
+                "ORDER BY created_at DESC LIMIT 1",
+                (fingerprint, STATUS_QUEUED, STATUS_PROCESSING, since),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        return SongRecord.from_row(row) if row else None
+
+    async def count_active(self) -> int:
+        """统计全局排队中 / 生成中的任务数（防刷爆线程池与外部 API 额度）。"""
+        async with connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM songs WHERE status IN (?, ?)",
+                (STATUS_QUEUED, STATUS_PROCESSING),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        return int(row[0]) if row else 0
+
+    async def count_active_by_client(self, client_key: str) -> int:
+        """统计单个客户端的活跃任务数，防止一个 IP 占满全部生成槽位。"""
+        async with connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM songs WHERE client_key = ? AND status IN (?, ?)",
+                (client_key, STATUS_QUEUED, STATUS_PROCESSING),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        return int(row[0]) if row else 0
+
+    async def update(self, song_id: str, **fields: Any) -> SongRecord | None:
         """局部更新字段，返回更新后的实体。
 
         归一化规则（与 entities 的转换互逆）：
@@ -72,22 +126,25 @@ class SongDAL:
             elif key in SONG_COLUMNS:
                 normalized[key] = value
         if not normalized:
-            return self.get(song_id)
+            return await self.get(song_id)
         normalized["updated_at"] = utc_now()
         assignments = ", ".join(f"{key} = :{key}" for key in normalized)
-        with connection() as conn:
-            conn.execute(
+        async with connection() as conn:
+            await conn.execute(
                 f"UPDATE songs SET {assignments} WHERE id = :song_id",
                 {**normalized, "song_id": song_id},
             )
-        return self.get(song_id)
+        # 在连接关闭后再读，避免同一事务内另开连接造成不必要的锁竞争。
+        return await self.get(song_id)
 
-    def delete(self, song_id: str) -> bool:
+    async def delete(self, song_id: str) -> bool:
         """删除作品；因外键 ON DELETE CASCADE，阶段记录会一并删除。
 
-        返回是否真的删到了行，供路由层区分 204 与 404。音频文件由
+        返回是否真的删到了行，供路由层区分 200 与 404。音频文件由
         SongService 单独清理，不在这里做，避免 DAL 依赖文件系统。
         """
-        with connection() as conn:
-            cursor = conn.execute("DELETE FROM songs WHERE id = ?", (song_id,))
-            return cursor.rowcount > 0
+        async with connection() as conn:
+            cursor = await conn.execute("DELETE FROM songs WHERE id = ?", (song_id,))
+            deleted = cursor.rowcount > 0
+            await cursor.close()
+        return deleted

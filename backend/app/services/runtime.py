@@ -1,39 +1,59 @@
-"""service 层：运行时单例装配（依赖注入的组装点）。
+"""service 层：运行时单例装配（FastAPI Depends 的组装点）。
 
-路由只依赖这里的 getter，不直接 new Service；测试可通过替换单例或调用
-``reset_runtime()`` 重建，从而让新的环境变量 / mock 设置生效。
+路由只依赖这里的 getter，不直接 new Service；测试可通过 ``reset_runtime()``
+重建，让新的环境变量 / mock 设置生效。
 
-为什么用线程池而不是 asyncio：五阶段流程是 httpx 同步阻塞调用，
-放线程池最省事，且与 SQLite「一操作一连接」的 DAL 天然契合。
+异步模型
+--------
+全链路已改为 asyncio：五阶段流程用 ``asyncio.create_task`` 后台执行，
+``asyncio.Semaphore`` 限制同时跑的作品数（上限来自 settings.max_active_jobs）。
+相比原来的 ThreadPoolExecutor：
+* httpx.AsyncClient / aiosqlite 都能在 event loop 上并发，不再需要线程池；
+* 任务集合 ``_tasks`` 持有强引用（否则可能被 GC 回收），关闭时可统一 cancel；
+* 数据库与文件 IO 都在各自层内异步化，不会阻塞轮询请求。
+
+注意 ``asyncio.Semaphore`` 与运行中的 event loop 绑定，这里按 loop 缓存，
+避免 TestClient 每次新建 loop 后复用旧信号量报错。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import TYPE_CHECKING
 
 from ..config import settings
+from ..constants import STATUS_FAILED
+from ..dal import SongDAL
+
+if TYPE_CHECKING:
+    from .llm_service import LLMService
+    from .song_service import SongService
+    from .workflow_service import WorkflowService
 
 logger = logging.getLogger(__name__)
 
-# 进程级单例；由 main.py 的 lifespan 在关闭时调用 shutdown() 清理。
-_executor: ThreadPoolExecutor | None = None
-_song_service: Any = None
-_workflow_service: Any = None
-_llm_service: Any = None
+# 进程级单例；由 main.py 的 async lifespan 在关闭时调用 shutdown() 清理。
+_song_service: SongService | None = None
+_workflow_service: WorkflowService | None = None
+_llm_service: LLMService | None = None
+_tasks: set[asyncio.Task[None]] = set()
+_semaphore: asyncio.Semaphore | None = None
+_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
 
-def get_executor() -> ThreadPoolExecutor:
-    """惰性创建生成任务线程池，并发上限由 settings.max_workers 控制。"""
-    global _executor
-    if _executor is None:
-        _executor = ThreadPoolExecutor(max_workers=max(1, settings.max_workers), thread_name_prefix="musicflow")
-    return _executor
+def get_semaphore() -> asyncio.Semaphore:
+    """惰性创建生成任务信号量；event loop 变化时自动重建。"""
+    global _semaphore, _semaphore_loop
+    loop = asyncio.get_running_loop()
+    if _semaphore is None or _semaphore_loop is not loop:
+        _semaphore = asyncio.Semaphore(max(1, settings.max_active_jobs))
+        _semaphore_loop = loop
+    return _semaphore
 
 
-def get_workflow_service() -> Any:
-    """惰性创建五阶段编排器（后台线程实际执行的对象）。"""
+async def get_workflow_service() -> WorkflowService:
+    """惰性创建五阶段编排器（后台任务实际执行的对象）。"""
     global _workflow_service
     if _workflow_service is None:
         # 延迟 import：避免模块加载期形成循环依赖，也便于测试先改配置。
@@ -43,25 +63,50 @@ def get_workflow_service() -> Any:
     return _workflow_service
 
 
-def _run_job(song_id: str) -> None:
-    """线程池入口：包一层兜底异常，防止未捕获异常让 worker 静默退出。
+async def _run_job(song_id: str) -> None:
+    """后台任务入口：拿信号量 -> 跑五阶段 -> 兜底记日志。
 
     阶段失败时 WorkflowService 已把作品置为 failed 并写入 error_message，
-    这里只负责记日志，不再改变数据库状态。
+    这里只负责记日志；应用关闭触发 cancel 时额外把作品标为 failed，
+    避免永远停在 processing 让前端一直轮询。
     """
     try:
-        get_workflow_service().run(song_id)
-    except Exception:  # noqa: BLE001 - 后台线程异常只记录，DB 里已写 failed
+        async with get_semaphore():
+            workflow = await get_workflow_service()
+            await workflow.run(song_id)
+    except asyncio.CancelledError:
+        logger.warning("生成任务被取消（应用关闭）：%s", song_id)
+        try:
+            await SongDAL().update(
+                song_id,
+                status=STATUS_FAILED,
+                current_stage=None,
+                error_message="服务关闭，生成任务已中断",
+            )
+        except Exception:  # noqa: BLE001 - 关闭阶段不再抛出二次异常
+            logger.exception("标记中断任务失败：%s", song_id)
+        raise
+    except Exception:  # noqa: BLE001 - 后台任务异常只记录，DB 里已写 failed
         logger.exception("后台生成任务异常结束：%s", song_id)
 
 
-def submit_job(song_id: str) -> None:
-    """POST /api/generations 立即返回，由线程池异步跑五阶段。"""
-    get_executor().submit(_run_job, song_id)
+async def submit_job(song_id: str) -> None:
+    """POST /api/generations 立即返回，由 asyncio 任务在后台跑五阶段。
+
+    ``_tasks`` 必须持有强引用：asyncio 只弱引用 task，不保存可能被 GC 提前
+    回收；``discard`` 回调保证任务结束后集合不会无限增长。
+    """
+    task = asyncio.create_task(_run_job(song_id), name=f"musicflow-{song_id}")
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
 
 
-def get_song_service() -> Any:
-    """惰性创建作品服务，并把 submit_job 注入进去（便于单测替换成同步执行）。"""
+async def get_song_service() -> SongService:
+    """惰性创建作品服务，并把异步 ``submit_job`` 注入进去。
+
+    这是 FastAPI ``Depends(get_song_service)`` 直接使用的依赖函数；
+    同一请求内多处 Depends 会被 FastAPI 缓存，只实例化一次。
+    """
     global _song_service
     if _song_service is None:
         from .song_service import SongService
@@ -70,7 +115,7 @@ def get_song_service() -> Any:
     return _song_service
 
 
-def get_llm_service() -> Any:
+async def get_llm_service() -> LLMService:
     """惰性创建轻量 LLM 服务，供 /api/llm 三个按钮使用。"""
     global _llm_service
     if _llm_service is None:
@@ -80,21 +125,38 @@ def get_llm_service() -> Any:
     return _llm_service
 
 
-def shutdown() -> None:
-    """应用关闭时释放线程池并清空单例。
+def active_task_count() -> int:
+    """当前仍在跑的后台任务数，便于日志与健康检查观测。"""
+    return len(_tasks)
 
-    ``cancel_futures=True`` 表示排队中尚未开始的任务直接丢弃；已经在跑的
-    任务不强制中断（进程退出会自然结束），避免写了一半的库记录。
+
+async def shutdown() -> None:
+    """应用关闭时取消未完成任务并清空单例（由 async lifespan 调用）。
+
+    cancel 后短暂 gather 等待任务收尾（写入 failed 状态），避免进程退出时
+    数据库写到一半被强行断开。
     """
-    global _executor, _song_service, _workflow_service, _llm_service
-    if _executor is not None:
-        _executor.shutdown(wait=False, cancel_futures=True)
-    _executor = None
+    global _semaphore, _semaphore_loop, _song_service, _workflow_service, _llm_service
+    pending = list(_tasks)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    _tasks.clear()
+    # 释放两个服务各自持有的 httpx.AsyncClient 连接池。
+    for service in (_workflow_service, _llm_service):
+        if service is not None:
+            try:
+                await service.aclose()
+            except Exception:  # noqa: BLE001 - 关闭阶段的清理失败不影响退出
+                logger.exception("关闭 LLM 连接池失败：%s", type(service).__name__)
+    _semaphore = None
+    _semaphore_loop = None
     _song_service = None
     _workflow_service = None
     _llm_service = None
 
 
-def reset_runtime() -> None:
-    """测试用：清掉单例，让新的环境变量 / mock 设置生效。"""
-    shutdown()
+async def reset_runtime() -> None:
+    """测试用：清掉单例与任务，让新的环境变量 / mock 设置生效。"""
+    await shutdown()

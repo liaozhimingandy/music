@@ -1,8 +1,12 @@
-"""service 层：OpenAI 兼容 LLM 客户端（httpx 实现，无 SDK 依赖）。
+"""service 层：OpenAI 兼容 LLM 客户端（httpx.AsyncClient，无 SDK 依赖）。
 
 * ``chat()`` 返回纯文本；``chat_json()`` 解析 JSON 并容忍 ```json 代码块。
 * ``stage`` / 其他 hints 供离线 MockLLMClient 使用，真实客户端忽略。
 * 提供 MockLLMClient，配合 ``MUSIC_STUDIO_MOCK=true`` 可不联网跑通全流程。
+
+全异步：网络请求用 ``await``，重试退改用 ``asyncio.sleep``，因此一个作品
+等待模型响应时不会阻塞 event loop 上的其它请求（前端轮询照常返回）。
+长连接 ``AsyncClient`` 由 WorkflowService.aclose() 在应用关闭时释放。
 
 配置来源为 backend/app/.env（见 .env.example）：LLM_BASE_URL / LLM_MODEL /
 LLM_API_KEY / LLM_CA_CERT 与三个超时值。CA 证书是可选的，用于企业代理
@@ -11,9 +15,9 @@ LLM_API_KEY / LLM_CA_CERT 与三个超时值。CA 证书是可选的，用于企
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -37,15 +41,20 @@ def strip_code_fence(content: str) -> str:
 
 
 class LLMClientProtocol(Protocol):
-    """阶段函数依赖的最小接口；真实 / Mock 客户端都可无缝替换。"""
+    """阶段函数依赖的最小接口；真实 / Mock 客户端都可无缝替换。
+
+    维护提示：所有方法都是 async，注入自定义实现时别忘了 ``await``。
+    """
 
     model: str
 
-    def chat_json(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> dict[str, Any]: ...
+    async def chat_json(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def aclose(self) -> None: ...
 
 
 class LLMClient:
-    """真实 LLM 客户端：同步 POST ``chat/completions``，失败按线性退避重试。
+    """真实 LLM 客户端：异步 POST ``chat/completions``，失败按线性退避重试。
 
     Args:
         config: 可注入的配置对象；缺省使用全局 settings。
@@ -72,9 +81,13 @@ class LLMClient:
             write=cfg.llm_write_timeout,
             pool=30.0,
         )
-        self.client = httpx.Client(base_url=base_url, headers=headers, timeout=timeout, verify=verify)
+        self.client = httpx.AsyncClient(base_url=base_url, headers=headers, timeout=timeout, verify=verify)
 
-    def chat(
+    async def aclose(self) -> None:
+        """关闭连接池；由 WorkflowService 在应用关闭时调用。"""
+        await self.client.aclose()
+
+    async def chat(
         self,
         system_prompt: str,
         user_prompt: str,
@@ -87,8 +100,8 @@ class LLMClient:
         """发起一次非流式对话，返回 ``choices[0].message.content`` 纯文本。
 
         重试覆盖网络错误与响应结构异常（HTTPError / KeyError 等）；
-        最多 ``max_retries`` 次，间隔 1s、2s、3s…。全部失败后抛
-        RuntimeError，由 WorkflowService 统一把作品置为 failed。
+        最多 ``max_retries`` 次，间隔 1s、2s、3s…（异步 sleep）。全部失败后
+        抛 RuntimeError，由 WorkflowService 统一把作品置为 failed。
         """
         payload: dict[str, Any] = {
             "model": model or self.model,
@@ -102,23 +115,23 @@ class LLMClient:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                response = self.client.post("chat/completions", json=payload)
+                response = await self.client.post("chat/completions", json=payload)
                 response.raise_for_status()
                 data = response.json()
                 return str(data["choices"][0]["message"]["content"] or "")
             except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
                 last_error = exc
                 if attempt < self.max_retries:
-                    time.sleep(1.0 * (attempt + 1))
+                    await asyncio.sleep(1.0 * (attempt + 1))
         raise RuntimeError(f"LLM 调用失败：{last_error}") from last_error
 
-    def chat_json(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> dict[str, Any]:
+    async def chat_json(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> dict[str, Any]:
         """调用 chat 并强制解析为 JSON 对象。
 
         报错信息里带上 stage 与返回内容前 300 字，方便定位是提示词问题
         还是模型输出格式问题（五个阶段都依赖结构化结果）。
         """
-        content = self.chat(system_prompt, user_prompt, **kwargs)
+        content = await self.chat(system_prompt, user_prompt, **kwargs)
         try:
             result = json.loads(strip_code_fence(content))
         except json.JSONDecodeError as exc:
@@ -137,7 +150,10 @@ class MockLLMClient:
 
     model = "mock-llm"
 
-    def chat(
+    async def aclose(self) -> None:
+        """Mock 无连接池，保留空实现以满足协议。"""
+
+    async def chat(
         self,
         system_prompt: str,  # noqa: ARG002
         user_prompt: str,
@@ -148,9 +164,11 @@ class MockLLMClient:
         **hints: Any,
     ) -> str:
         """按 chat_json 的结果序列化成 JSON 文本，模拟真实模型的文本返回。"""
-        return json.dumps(self.chat_json(system_prompt, user_prompt, stage=stage, **hints), ensure_ascii=False)
+        return json.dumps(
+            await self.chat_json(system_prompt, user_prompt, stage=stage, **hints), ensure_ascii=False
+        )
 
-    def chat_json(
+    async def chat_json(
         self,
         system_prompt: str,  # noqa: ARG002
         user_prompt: str,
@@ -227,6 +245,7 @@ def build_llm_client(config: Any = None) -> LLMClientProtocol:
     """工厂：mock 模式或缺 API Key 时返回 MockLLMClient，否则返回真实客户端。
 
     这样 WorkflowService 无需感知运行模式，且离线环境也能完整演示。
+    纯构造、无 IO，保持同步函数即可。
     """
     cfg = config or settings
     if cfg.mock_mode or not cfg.llm_api_key:

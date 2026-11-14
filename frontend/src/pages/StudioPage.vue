@@ -273,6 +273,19 @@ function handleSeek(value: number) {
 }
 
 /**
+ * 从 axios 错误里取出后端返回的中文原因（429 限流 / 413 请求体过大 /
+ * 422 参数校验）。这些是服务端主动拒绝，detail 里写了具体原因与重试建议，
+ * 直接展示比笼统的「检查后端服务」更准确；其它错误仍走默认兜底文案。
+ */
+function serverErrorMessage(error: unknown): string | null {
+  const response = (error as { response?: { status?: number; data?: { detail?: string } } } | null)?.response;
+  if (response?.status && [413, 422, 429].includes(response.status)) {
+    return response.data?.detail ?? null;
+  }
+  return null;
+}
+
+/**
  * 「简单创作」四步流程：AI 扩写描述 -> 写词（纯音乐跳过）-> 起标题
  * -> POST /api/generations 提交后台任务。
  *
@@ -351,7 +364,7 @@ async function handleCreate(values: CreateFormValues) {
     MessagePlugin.success("生成任务已提交");
   } catch (error) {
     console.error("生成流程失败", error);
-    patch({ error: "生成失败，请检查后端服务或模型配置" });
+    patch({ error: serverErrorMessage(error) ?? "生成失败，请检查后端服务或模型配置" });
   } finally {
     flowRunning.value = false;
   }

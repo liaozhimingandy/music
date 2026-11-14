@@ -86,8 +86,21 @@ class Settings(BaseSettings):
 
     # 流程
     mock_mode: bool = Field(default=False, validation_alias="MUSIC_STUDIO_MOCK")  # 离线演示：不联网、不消耗密钥
-    max_workers: int = 2               # 同时生成的作品数上限
     default_duration_seconds: int = 180
+
+    # 接口防护：防重复提交与恶意刷接口（实现见 deps.py / services/rate_limiter.py）
+    # 全部有安全缺省值，零配置也能防住双击、脚本循环调用与超大请求体。
+    rate_limit_enabled: bool = Field(default=True, validation_alias="MUSIC_STUDIO_RATE_LIMIT_ENABLED")
+    rate_limit_window_seconds: int = Field(default=60, ge=1, validation_alias="MUSIC_STUDIO_RATE_LIMIT_WINDOW")
+    rate_limit_read: int = Field(default=180, ge=1, validation_alias="MUSIC_STUDIO_RATE_LIMIT_READ")
+    rate_limit_llm: int = Field(default=20, ge=1, validation_alias="MUSIC_STUDIO_RATE_LIMIT_LLM")
+    rate_limit_create: int = Field(default=5, ge=1, validation_alias="MUSIC_STUDIO_RATE_LIMIT_CREATE")
+    max_active_jobs: int = Field(default=4, ge=1, validation_alias="MUSIC_STUDIO_MAX_ACTIVE_JOBS")
+    max_active_jobs_per_client: int = Field(default=2, ge=1, validation_alias="MUSIC_STUDIO_MAX_ACTIVE_PER_CLIENT")
+    dedupe_window_seconds: int = Field(default=30, ge=0, validation_alias="MUSIC_STUDIO_DEDUPE_WINDOW")
+    max_request_bytes: int = Field(default=64 * 1024, ge=1024, validation_alias="MUSIC_STUDIO_MAX_REQUEST_BYTES")
+    # 默认不信任 X-Forwarded-For（可伪造）；只有部署在可信反向代理后才开启。
+    trust_proxy_headers: bool = Field(default=False, validation_alias="MUSIC_STUDIO_TRUST_PROXY")
 
     @property
     def db_path(self) -> Path:

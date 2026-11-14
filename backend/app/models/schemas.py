@@ -2,42 +2,72 @@
 
 这一层是前后端契约：改字段名或状态取值前，务必同步修改前端 interface 与
 services/api.ts。响应模型由 SongService 统一组装，路由不直接返回数据库实体。
+
+安全约定
+--------
+所有**请求体**都继承 ``StrictRequestModel``（``extra="forbid"``）并给文本
+字段设置长度上限。这是防恶意调用的第一道关卡：超长 prompt 会直接被
+Pydantic 以 422 拒绝，不会进入 LLM / 音乐生成计费链路；未知字段也被拒绝，
+避免有人塞进巨量数据绕过 size 检查。响应模型不受此限制（可扩展字段）。
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import json
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # 枚举值来自前端的下拉项 / 任务类型，勿随意改名。
 TaskType = Literal["text2music", "cover", "repaint"]
 ModelVariant = Literal["base", "turbo", "shift"]
 LLMTask = Literal["prompt", "lyrics", "title"]
 
+# 与前端 CreatePanel.vue 的 500 字限制保持一致；服务端必须再校一次，
+# 因为绕过页面直接调接口时前端的 maxlength 不起作用。
+MAX_PROMPT_LENGTH = 500
+MAX_LYRICS_LENGTH = 8000
+MAX_TITLE_LENGTH = 100
+MAX_SEED_LENGTH = 1000
+MAX_METADATA_CHARS = 4096
 
-class GenerationInputs(BaseModel):
+
+class StrictRequestModel(BaseModel):
+    """请求体基类：拒绝未知字段，防止夹带超大 / 非预期数据。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GenerationInputs(StrictRequestModel):
     """前端「简单创作」提交的三项输入，另带两个可选的音乐参数。
 
     ``instrumental`` 为真时 lyrics 会被忽略，服务端按纯音乐处理。
     """
 
-    prompt: str | None = None       # 用户描述（最多 500 字，前端已做截断）
-    lyrics: str | None = None       # 用户自填歌词，可为空由 LLM 生成
+    prompt: str | None = Field(default=None, max_length=MAX_PROMPT_LENGTH)  # 用户描述
+    lyrics: str | None = Field(default=None, max_length=MAX_LYRICS_LENGTH)  # 用户自填歌词，可为空由 LLM 生成
     instrumental: bool = False
     bpm: int | None = Field(default=None, ge=30, le=300)
     duration_seconds: int | None = Field(default=None, ge=10, le=600)
 
 
-class GenerationCreate(BaseModel):
+class GenerationCreate(StrictRequestModel):
     """POST /api/generations 请求体。创建后立刻返回 queued，不等待生成完成。"""
 
-    title: str | None = None        # 初值；流程结束后可能被润色阶段的标题覆盖
+    title: str | None = Field(default=None, max_length=MAX_TITLE_LENGTH)  # 初值；流程后可能被润色结果覆盖
     task_type: TaskType = "text2music"
-    mode: str = "simple"
+    mode: str = Field(default="simple", max_length=32)
     model_variant: ModelVariant = "turbo"
     inputs: GenerationInputs = Field(default_factory=GenerationInputs)
     metadata: dict[str, Any] = Field(default_factory=dict)  # 透传的扩展信息
+
+    @field_validator("metadata")
+    @classmethod
+    def _limit_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """限制透传 metadata 的序列化体积，避免用它绕过请求体大小检查。"""
+        if len(json.dumps(value, ensure_ascii=False, default=str)) > MAX_METADATA_CHARS:
+            raise ValueError(f"metadata 过大（上限 {MAX_METADATA_CHARS} 字符）")
+        return value
 
 
 class StageResponse(BaseModel):
@@ -90,13 +120,13 @@ class GenerationDetailResponse(GenerationResponse):
     stages: list[StageResponse] = Field(default_factory=list)
 
 
-class LLMTaskRequest(BaseModel):
+class LLMTaskRequest(StrictRequestModel):
     """POST /api/llm 请求体：供「AI 扩写描述 / 生成歌词 / 起标题」三个按钮复用。"""
 
     task: LLMTask
-    seed_prompt: str                 # 用户已输入的描述，作为扩写种子
+    seed_prompt: str = Field(..., max_length=MAX_SEED_LENGTH)  # 用户已输入的描述，作为扩写种子
     instrumental: bool = False       # 纯音乐时不会要求生成人声歌词
-    style_tags: list[str] = Field(default_factory=list)
+    style_tags: list[Annotated[str, Field(max_length=40)]] = Field(default_factory=list, max_length=20)
 
 
 class LLMTaskResponse(BaseModel):

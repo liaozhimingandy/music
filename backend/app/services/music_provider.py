@@ -1,4 +1,4 @@
-"""service 层：ModelScope ACE-Step 异步音乐生成客户端。
+"""service 层：ModelScope ACE-Step 异步音乐生成客户端（全异步）。
 
 保留原型的四项能力（这是本模块最需要维护者理解的约定）：
 
@@ -10,12 +10,15 @@
 4. **下载失败只重下**：状态 generated 表示远端已成功，下次跳过轮询直接
    重新下载音频。
 
-网络请求统一用 httpx；状态流转大致为
+网络请求统一用 ``httpx.AsyncClient``：提交 / 轮询 / 流式下载都 ``await``，
+轮询等待用 ``asyncio.sleep``，所以等待远端生成的几分钟里 event loop 仍可
+正常响应前端轮询。状态流转大致为
 ``submitted -> (polling) -> generated -> completed``，异常分支为 ``failed``。
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -26,13 +29,13 @@ import wave
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-from uuid import uuid4
 
 import httpx
 
 from ..config import settings
 from ..constants import FINAL_AUDIO_NAME, MUSIC_TASK_FILE
 from ..dal import ArtifactStore
+from ..ids import new_provider_task_id
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +58,7 @@ class MusicProvider:
         self.timeout = max(1, int(cfg.music_timeout))
         self.download_timeout = cfg.music_download_timeout
 
-    def generate(
+    async def generate(
         self,
         *,
         prompt: str,
@@ -87,7 +90,7 @@ class MusicProvider:
 
         duration = int(duration)
         work_dir = Path(work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(work_dir.mkdir, parents=True, exist_ok=True)
         store = ArtifactStore(work_dir, resume=True)
 
         # 指纹用 sort_keys 保证字典顺序变化不会影响哈希结果。
@@ -98,8 +101,8 @@ class MusicProvider:
 
         # --- 读取已有任务记录，决定复用 / 续跑 / 拒绝 / 重提交 ---
         task: dict[str, Any] | None = None
-        if store.exists(MUSIC_TASK_FILE):
-            task = store.load_json(MUSIC_TASK_FILE)
+        if await store.exists(MUSIC_TASK_FILE):
+            task = await store.load_json(MUSIC_TASK_FILE)
             if task.get("fingerprint") != fingerprint:
                 # 目录被别的参数占用：默认拒绝，避免返回不匹配的音频。
                 if not force_regenerate:
@@ -107,7 +110,7 @@ class MusicProvider:
                 task = None
             elif task.get("status") == "completed":
                 audio_path = Path(task.get("audio_path") or "")
-                if audio_path.is_file():
+                if await asyncio.to_thread(audio_path.is_file):
                     logger.info("检测到已完成的音乐任务，直接返回：%s", task.get("task_id"))
                     return self._result(task, audio_path, duration)
             elif task.get("status") == "failed" and not force_regenerate:
@@ -118,11 +121,11 @@ class MusicProvider:
                 task = None
 
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-        with httpx.Client(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             # --- 首次提交：异步模式头不可少，否则接口会同步等待直到超时 ---
             if task is None:
                 logger.info("提交音乐生成任务，模型=%s，时长=%ss", self.model, duration)
-                response = client.post(
+                response = await client.post(
                     f"{self.base_url}/v1/audios/generations",
                     headers={**headers, "X-ModelScope-Async-Mode": "true"},
                     json={"model": self.model, "prompt": prompt, "lyrics": lyrics, "duration": duration},
@@ -144,7 +147,7 @@ class MusicProvider:
                     "audio_path": None,
                     "duration": duration,
                 }
-                store.save_json(task, MUSIC_TASK_FILE)
+                await store.save_json(task, MUSIC_TASK_FILE)
             else:
                 logger.info("恢复已有音乐任务：%s", task.get("task_id"))
 
@@ -155,7 +158,7 @@ class MusicProvider:
                 started = time.monotonic()
                 last_status: str | None = None
                 while True:
-                    response = client.get(
+                    response = await client.get(
                         f"{self.base_url}/v1/tasks/{task_id}",
                         headers={**headers, "X-ModelScope-Task-Type": "audio_generation"},
                     )
@@ -168,11 +171,11 @@ class MusicProvider:
                         if not audio_url:
                             raise RuntimeError(f"任务成功但未返回音频地址：{polled}")
                         task.update(status="generated", audio_url=audio_url)
-                        store.save_json(task, MUSIC_TASK_FILE)
+                        await store.save_json(task, MUSIC_TASK_FILE)
                         break
                     if status == "FAILED":
                         task.update(status="failed", error=polled)
-                        store.save_json(task, MUSIC_TASK_FILE)
+                        await store.save_json(task, MUSIC_TASK_FILE)
                         raise RuntimeError(f"音乐生成失败：{polled}")
                     if time.monotonic() - started >= self.timeout:
                         # 不改状态，下次可继续轮询同一个 task_id
@@ -180,22 +183,23 @@ class MusicProvider:
                     if status != last_status:
                         logger.info("音乐任务状态：%s", status)
                         last_status = status
-                    time.sleep(self.poll_interval)
+                    # 异步等待，不阻塞 event loop 上的其它请求。
+                    await asyncio.sleep(self.poll_interval)
 
             # --- 下载音频：流式写盘，避免大文件占满内存 ---
             audio_url = task["audio_url"]
             suffix = Path(urlparse(audio_url).path).suffix or ".audio"
             output_path = work_dir / f"{FINAL_AUDIO_NAME}{suffix}"
             logger.info("开始下载音频：%s", audio_url)
-            with client.stream("GET", audio_url, timeout=self.download_timeout) as download:
+            async with client.stream("GET", audio_url, timeout=self.download_timeout) as download:
                 download.raise_for_status()
                 with output_path.open("wb") as handle:
-                    for chunk in download.iter_bytes(chunk_size=1024 * 1024):
+                    async for chunk in download.aiter_bytes(chunk_size=1024 * 1024):
                         if chunk:
-                            handle.write(chunk)
+                            await asyncio.to_thread(handle.write, chunk)
 
             task.update(status="completed", audio_path=str(output_path))
-            store.save_json(task, MUSIC_TASK_FILE)
+            await store.save_json(task, MUSIC_TASK_FILE)
             return self._result(task, output_path, duration)
 
     @staticmethod
@@ -216,25 +220,12 @@ class MockMusicProvider:
 
     model = "mock-music"
 
-    def generate(
-        self,
-        *,
-        prompt: str,  # noqa: ARG002
-        lyrics: str,  # noqa: ARG002
-        duration: int,
-        work_dir: Path,
-        force_regenerate: bool = False,  # noqa: ARG002
-    ) -> dict[str, Any]:
-        """写入 8 秒 11kHz 单声道 WAV（三谐波 + 淡入淡出），返回与真实实现同构的结果。
+    @staticmethod
+    def _synth_sync(audio_path: Path) -> None:
+        """同步合成 8 秒 11kHz 单声道 WAV（三谐波 + 首尾淡入淡出）。
 
-        固定 8 秒而非请求时长，是为了让本地演示秒级完成；``duration``
-        仍原样回填到结果里，保证前端展示与真实模式一致。
+        CPU 密集循环放在线程池执行，避免阻塞 event loop；实际写盘也在这里完成。
         """
-        work_dir = Path(work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-        store = ArtifactStore(work_dir, resume=True)
-        audio_path = work_dir / f"{FINAL_AUDIO_NAME}.wav"
-
         sample_rate = 11025
         seconds = 8
         with wave.open(str(audio_path), "wb") as wav:
@@ -249,8 +240,29 @@ class MockMusicProvider:
                 frames.extend(struct.pack("<h", int(value * fade * 8000)))
             wav.writeframes(bytes(frames))
 
-        task_id = f"mock-{uuid4().hex[:12]}"
-        store.save_json(
+    async def generate(
+        self,
+        *,
+        prompt: str,  # noqa: ARG002
+        lyrics: str,  # noqa: ARG002
+        duration: int,
+        work_dir: Path,
+        force_regenerate: bool = False,  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """写入 8 秒 WAV 并返回与真实实现同构的结果。
+
+        固定 8 秒而非请求时长，是为了让本地演示秒级完成；``duration``
+        仍原样回填到结果里，保证前端展示与真实模式一致。
+        """
+        work_dir = Path(work_dir)
+        await asyncio.to_thread(work_dir.mkdir, parents=True, exist_ok=True)
+        store = ArtifactStore(work_dir, resume=True)
+        audio_path = work_dir / f"{FINAL_AUDIO_NAME}.wav"
+        await asyncio.to_thread(self._synth_sync, audio_path)
+
+        # 演示任务 ID 同样用 UUIDv7，保证日志 / 任务文件里的时间有序。
+        task_id = new_provider_task_id()
+        await store.save_json(
             {"task_id": task_id, "status": "completed", "audio_url": "mock://local", "audio_path": str(audio_path)},
             MUSIC_TASK_FILE,
         )
