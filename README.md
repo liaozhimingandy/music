@@ -145,9 +145,20 @@ frontend/
 | `ACE_STEP_ACE_REPO_PATH` / `ACE_STEP_CHECKPOINTS_PATH` | ACE 仓库与权重位置 |
 | `ACE_STEP_OPENAI_ENABLED` + `ACE_STEP_OPENAI_ENDPOINT` | OpenAI 兼容端点，用于描述扩写、写词、起标题 |
 
+## 仓库
+
+本仓库已重新初始化，历史从 `chore: 初始化 Music Studio` 开始，**没有 origin 远程**。推送到自己的远端前先执行：
+
+```bash
+git remote add origin <你的仓库地址>
+git push -u origin main
+```
+
+GitHub Pages 的 base 路径由 CI 按 `github.event.repository.name` 自动注入，因此远端仓库改名为 `music-studio` 等任意名称都无需改配置。
+
 ## 开发备注
 
-- `.gitignore` 中的 `models/`、`data/` 已收窄为「仅仓库根目录」，避免误伤源码目录 `backend/app/models/` 与 `frontend/src/` 下的文件。
+- `.gitignore` 中的 `models/`、`data/` 已收窄为「仅仓库根目录」，避免误伤源码目录 `backend/app/models/` 与 `frontend/src/` 下的文件；另外忽略 `*.egg-info/` 生成物与 `.env.local` 私有变量。
 - `backend/app/models/`（SQLAlchemy `Generation` ORM）曾因上述忽略规则未被提交，已按 `egg-info/SOURCES.txt` 记录的结构补回，否则后端启动会 ImportError。
 - 类型检查用 `vue-tsc --noEmit -p tsconfig.app.json`，不会生成 `vite.config.js` / `*.tsbuildinfo` 等产物污染工作树（Vite 会优先读取 `.js` 配置，曾与 `.ts` 配置冲突）。
 - `.env.development` / `.env.production` 是可提交的模板配置（不含密钥）；本地私密变量请放 `.env.local`（已被忽略）。
