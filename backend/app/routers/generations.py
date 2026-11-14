@@ -1,7 +1,8 @@
 """作品接口：创建（异步排队）、详情、阶段进度、音频下载、删除。
 
 所有接口都通过 ``Depends(get_song_service)`` 取服务单例，路由本身不碰 DAL。
-前端调用点见 frontend/src/services/api.ts。
+前端调用点见 frontend/src/services/api.ts；``/v1`` 前缀由 routers/__init__.py
+的聚合路由统一添加，本文件只写相对路径。
 
 接口防护（依赖层，见 deps.py）：
 * router 级 ``reject_oversized_body``  -> 413；
@@ -27,7 +28,7 @@ from ..services.runtime import get_song_service
 from ..services.song_service import SongService, TooManyActiveJobs
 
 router = APIRouter(
-    prefix="/api/generations",
+    prefix="/generations",
     tags=["generations"],
     dependencies=[Depends(reject_oversized_body)],
 )
@@ -58,7 +59,7 @@ async def create_generation(
     不重复计费、不重复生成；``force=true`` 可显式要求再生成一次。
 
     不要把这里改成同步等待：真实生成可能耗时数十分钟，前端会超时。
-    前端拿到记录后靠轮询 /api/history 观察状态变化。
+    前端拿到记录后靠轮询 /v1/history 观察状态变化。
     """
     try:
         result = await svc.create(
@@ -122,7 +123,7 @@ async def download_audio(
     return FileResponse(path, media_type=media_type, filename=filename)
 
 
-@router.delete("/{song_id}", dependencies=[Depends(enforce_read_policy)])
+# @router.delete("/{song_id}", dependencies=[Depends(enforce_read_policy)],)
 async def delete_generation(
     song_id: SongId,
     svc: SongService = Depends(get_song_service),

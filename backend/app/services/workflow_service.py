@@ -5,7 +5,7 @@
 
 前端体验链路：POST 返回 ``queued`` -> 本服务置 ``processing`` 并逐阶段
 更新 ``current_stage`` -> 全部完成置 ``ready`` 并写 audio_path；
-前端每 2 秒轮询 /api/history 即可刷新状态与进度。
+前端每 2 秒轮询 /v1/history 即可刷新状态与进度。
 
 续跑约定：阶段产物 JSON 存在即视为该阶段已完成（``_execute`` 直接复用），
 产物损坏则重新执行该阶段。因此清理 ``data/outputs/<song_id>/`` 会触发重跑。

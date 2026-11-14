@@ -1,30 +1,43 @@
 # 后端接口清单（Music Studio）
 
 > 后端为 FastAPI + SQLite3，分层 `routers → service → dal → model`，**全链路异步**（asyncio + aiosqlite + httpx.AsyncClient）。
-> 除 `/health` 外统一 `/api` 前缀；交互式文档：`http://localhost:8788/docs`。
+> **所有接口统一 `/v1` 版本前缀**（含健康检查），交互式文档：`http://localhost:8788/docs`（文档端点本身不带版本号）。
 > 字段与 `frontend/src/interface/index.ts` 一一对应，请求层由 `frontend/src/services/api.ts` 统一封装。
 
-所有路由都是 `async def`，服务通过 `Depends(get_song_service)` / `Depends(get_llm_service)` 注入；防护逻辑集中在 `backend/app/deps.py`，业务去重在 `SongService.create`。
+## 零、版本前缀约定
+
+| 项 | 值 | 唯一来源 |
+| --- | --- | --- |
+| 后端前缀 | `API_V1_PREFIX = "/v1"` | `backend/app/constants.py` |
+| 注册方式 | `api_v1 = APIRouter(prefix=API_V1_PREFIX)` 聚合四个子路由，`main.py` 只 `include_router(api_v1)` 一次 | `backend/app/routers/__init__.py` |
+| 子路由路径 | `/health`、`/history`、`/llm`、`/generations`（**不写版本号**） | `backend/app/routers/*.py` |
+| 前端基址 | `VITE_APP_API_BASE_URL=/v1`，业务里只写 `/history` 等相对路径 | `frontend/.env.development`、`frontend/src/services/api.ts` |
+| 本地代理 | Vite dev / preview 把 `/v1` 代理到 `127.0.0.1:8788` | `frontend/vite.config.ts` |
+| `audio_url` | `/v1/generations/{id}/audio`（模板常量 `AUDIO_URL_TEMPLATE`），前端用 `resolveAudioUrl()` 兼容同源代理与直连完整域名 | `song_service.py`、`services/api.ts` |
+
+> 旧的 `/api/*` 与无前缀 `/health` 已下线（返回 404）。升级 v2 时在 `routers/__init__.py` 新建 `APIRouter(prefix="/v2")` 并按需复用子路由，v1 不受影响。
+
+接口通用约定：所有路由都是 `async def`，服务通过 `Depends(get_song_service)` / `Depends(get_llm_service)` 注入；防护逻辑集中在 `backend/app/deps.py`，业务去重在 `SongService.create`。
 
 ## 一、接口总览
 
 | # | 方法 | 路径 | 前端是否调用 | 说明 |
 | --- | --- | --- | --- | --- |
-| 1 | GET | `/health` | 否 | 健康检查，返回应用名、运行模式、数据库路径（不限流） |
-| 2 | GET | `/api/history?limit=25` | 是 | 作品列表，前端每 2 秒轮询；也是后端在线探测依据 |
-| 3 | POST | `/api/llm` | 是 | 描述扩写 / 写词 / 起标题，一次创作流程调用 2~3 次 |
-| 4 | POST | `/api/generations` | 是 | 创建作品，**立即返回 `queued`**，后台 asyncio 任务跑五阶段 |
-| 5 | GET | `/api/generations/{id}` | 否（预留） | 作品详情 + 五阶段进度 |
-| 6 | GET | `/api/generations/{id}/stages` | 否（预留） | 只看阶段进度 |
-| 7 | GET | `/api/generations/{id}/audio` | 是（`audio_url`） | 音频二进制流 |
-| 8 | DELETE | `/api/generations/{id}` | 是 | 删除作品、音频文件与阶段产物 |
+| 1 | GET | `/v1/health` | 否 | 健康检查，返回应用名、运行模式、数据库路径与当前 `music_model`（不限流） |
+| 2 | GET | `/v1/history?limit=25` | 是 | 作品列表，前端每 2 秒轮询；也是后端在线探测依据 |
+| 3 | POST | `/v1/llm` | 仅辅助按钮 | 描述扩写 / 写词 / 起标题；**「开始生成」主链路不调用它**，后端五阶段已包含这些 LLM 步骤 |
+| 4 | POST | `/v1/generations` | 是 | 创建作品，**立即返回 `queued`**，后台 asyncio 任务跑五阶段 |
+| 5 | GET | `/v1/generations/{id}` | 否（预留） | 作品详情 + 五阶段进度 |
+| 6 | GET | `/v1/generations/{id}/stages` | 否（预留） | 只看阶段进度 |
+| 7 | GET | `/v1/generations/{id}/audio` | 是（`audio_url`） | 音频二进制流 |
+| 8 | DELETE | `/v1/generations/{id}` | 是 | 删除作品、音频文件与阶段产物 |
 
 > 后端未启动时前端自动进入**演示模式**（`services/demo.ts` 内存数据），界面与生成流程仍可预览。
 
 ## 二、生成任务的异步模型
 
 ```
-POST /api/generations  ──> 幂等查重 ──> 活跃任务闸门 ──> 写 songs(queued) + 预置 song_stages ──> 立即返回
+POST /v1/generations  ──> 幂等查重 ──> 活跃任务闸门 ──> 写 songs(queued) + 预置 song_stages ──> 立即返回
                                                               │
                                                               └─ asyncio.create_task（Semaphore 限并发）
                                                                  planning → lyrics → polish → music → music_generation
@@ -36,7 +49,7 @@ POST /api/generations  ──> 幂等查重 ──> 活跃任务闸门 ──> �
 - 数据库走 `aiosqlite` 单条长连接 + 事务锁，文件 IO 走 `asyncio.to_thread`，HTTP 走 `httpx.AsyncClient`。等待 LLM / 远端音乐生成的几分钟里，event loop 仍能正常响应前端轮询。
 - 应用关闭时依次取消未完成后台任务（写为 `failed`）→ 释放 httpx 连接池 → 关闭数据库连接。
 
-前端只轮询 `GET /api/history`，用 `status` 判断进度：
+前端只轮询 `GET /v1/history`，用 `status` 判断进度：
 
 | status | 前端显示 | 含义 |
 | --- | --- | --- |
@@ -52,7 +65,7 @@ POST /api/generations  ──> 幂等查重 ──> 活跃任务闸门 ──> �
 `SongService.create` 对每次请求计算 `input_fingerprint`：
 
 - **有 `Idempotency-Key` 请求头**：以该键的哈希为指纹（标准幂等语义，适合网络重试）；
-- **无该头**：对 `title` / `task_type` / `mode` / `model_variant` / `inputs.*` 做规范化（文本去首尾空白、布尔统一、排除不影响生成的 `metadata`）后取 SHA256。
+- **无该头**：对 `title` / `task_type` / `mode` / `model_variant` / `inputs.*` 做规范化（文本去首尾空白、布尔统一、排除不影响生成的 `metadata`）后取 SHA256；`model_variant` 未传时按 `MUSIC_MODEL` 配置值归一化，保证「传/不传」算出同一指纹。
 
 命中规则（查 `songs` 表，依赖 `idx_songs_fingerprint` 索引）：
 
@@ -75,12 +88,12 @@ X-Deduplicated: true
 | 防护 | 默认值 | 命中结果 |
 | --- | --- | --- |
 | 读接口滑动窗口限流（按客户端 IP 哈希） | 180 次 / 60s | `429` + `Retry-After` |
-| `/api/llm` 限流（消耗 LLM 额度） | 20 次 / 60s | `429` + `Retry-After` |
-| `POST /api/generations` 限流（消耗生成额度） | 5 次 / 60s | `429` + `Retry-After` |
+| `/v1/llm` 限流（消耗 LLM 额度） | 20 次 / 60s | `429` + `Retry-After` |
+| `POST /v1/generations` 限流（消耗生成额度） | 5 次 / 60s | `429` + `Retry-After` |
 | 全局活跃任务上限 | 4 | `429`（真新建时） |
 | 单客户端活跃任务上限 | 2 | `429`（真新建时） |
 | 请求体大小（Content-Length） | 64 KiB | `413` |
-| 请求体字段约束 | `prompt ≤ 500`、`lyrics ≤ 8000`、`title ≤ 100`、`seed_prompt ≤ 1000`、`metadata ≤ 4096 字符`、`extra=forbid` | `422` |
+| 请求体字段约束 | `inputs.prompt` 非空且 ≤ 500、`lyrics ≤ 8000`、`title ≤ 100`、`seed_prompt ≤ 1000`、`metadata ≤ 4096 字符`、`extra=forbid` | `422` |
 | `limit` 查询参数 | `1 ~ 100` | `422` |
 | `song_id` 路径参数 | `^[0-9a-f]{32}$` | `422` |
 
@@ -100,11 +113,28 @@ X-Deduplicated: true
 | `413` | 请求体过大 | `{"detail": "请求体过大（上限 65536 字节）"}` |
 | `422` | 参数校验失败（Pydantic / Query / Path） | `{"detail": [...]}` |
 | `429` | 限流或活跃任务超限 | `{"detail": "生成任务已达全局上限（4），请等待现有任务完成"}` |
+| `500` | 服务端内部错误 | `{"detail": "服务器内部错误，请查看后端日志"}` |
 | `502` | 上游 LLM 调用失败 | `{"detail": "LLM 调用失败：…"}` |
+
+### 3.4 跨域（CORS）
+
+前端 dev 直连后端（`http://127.0.0.1:5177` → `http://localhost:8000`）属于不同源。后端 `CORSMiddleware` 的配置：
+
+| 项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `allow_origins` | `CORS_ORIGINS`（空） | 额外白名单，支持逗号分隔或 JSON 数组；生产显式列出前端域名 |
+| `allow_origin_regex` | `^https?://(localhost\|127\.0\.0\.1\|\[::1\])(:\d+)?$` | **默认放行任意端口的本机回环来源**，换端口不用改配置 |
+| `allow_credentials` / `allow_methods` / `allow_headers` | `true` / `*` / `*` | 与 axios 的 JSON 请求头、下载音频兼容 |
+
+**排坑**：浏览器报 `No 'Access-Control-Allow-Origin'` 时不一定是 CORS 配错。Starlette 的 `ServerErrorMiddleware` 在最外层，后端未捕获异常生成的纯文本 500 不经过 CORS 中间件，浏览器就会误报跨域。本项目在 `app/middleware.py` 用纯 ASGI 中间件（挂在 CORSMiddleware 内层）把异常转成 JSON 500，让响应继续走 CORS 流程，同时在后端日志留完整 traceback。排查时先 `curl -i -H "Origin: http://127.0.0.1:5177" http://localhost:8000/v1/health`，再看后端日志。
+
+> 想彻底避开跨域：把 `VITE_APP_API_BASE_URL` 设回 `/v1` 走 Vite 同源代理，并用 `VITE_API_PROXY_TARGET` 指向自己启动的后端端口。
 
 ## 四、请求 / 响应结构
 
-### POST /api/llm
+### POST /v1/llm
+
+仅由「AI 扩写描述」等**用户主动点击的辅助按钮**调用；点「开始生成」不会走这里。
 
 ```json
 { "task": "prompt", "seed_prompt": "夏末站台告别", "instrumental": false, "style_tags": [] }
@@ -118,33 +148,45 @@ X-Deduplicated: true
 
 未配置 LLM Key 或开启离线模式时返回本地兜底文本，`provider` 为 `local`。
 
-### POST /api/generations
+### POST /v1/generations
+
+前端「开始生成」只提交用户原始描述，一次请求即入队：
 
 ```json
 {
-  "title": "夏末告别",
   "task_type": "text2music",
   "mode": "simple",
-  "model_variant": "turbo",
-  "inputs": { "prompt": "……", "lyrics": "[Instrumental]", "instrumental": false }
+  "inputs": { "prompt": "……", "instrumental": false }
 }
 ```
 
+- `inputs.prompt` **必填且不能全为空白**（前端按钮会禁用空输入，服务端再以 422 兜底）；它作为五阶段流程的原始创作输入。
+- `title` / `inputs.lyrics` / `model_variant` 都可省略：标题与歌词由后端润色阶段产出并覆盖，模型由后端 `MUSIC_MODEL` 回填。显式传值时作为初值/展示标记保留，不会改变实际生成用的模型。
+- `instrumental=true` 时最终送生成接口的歌词为 `[Instrumental]`。
+
 可选查询参数 `force=true`（跳过去重）；可选请求头 `Idempotency-Key: <任意字符串>`（自定义幂等键）。
 
-`inputs.prompt` 作为五阶段流程的原始创作输入；`title` / `lyrics` 作为初值，流程结束后由润色与制作方案的结果覆盖（后端流程为准）。`instrumental=true` 时最终送生成接口的歌词为 `[Instrumental]`。
+#### 模型取值约定（model_variant 用哪里的枚举）
 
-### GenerationResponse（`/api/history`、`POST /api/generations`）
+| 项 | 说明 |
+| --- | --- |
+| 唯一来源 | `backend/app/config.py` 的 `music_model`，即环境变量 `MUSIC_MODEL`，默认 **`ACE-Step/acestep-v15-xl-sft`**（ModelScope 上的 ACE-Step 模型 ID） |
+| 谁在使用 | `MusicProvider` 提交给 `/v1/audios/generations` 的 `model` 参数、`stage_steps.run_music_prompt` 的 `target_model` 模板变量与强校验、`metadata.target_model` |
+| 前端 | **不需要维护枚举**：提交时不传 `model_variant`；要查询当前值读 `GET /v1/health` 的 `music_model`；展示用 `variantLabel()` / `variantShortLabel()` 兜底未知值 |
+| 历史值 | 旧演示数据的 `base` / `turbo` / `shift` 只是展示标记；`GenerationResponse.model_variant` 固定为 `str`，避免旧记录让 `/v1/history` 500 |
+| 换模型 | 先确认 `prompts/music/system.md` 里的 `target_model` 示例兼容——提示词不可修改，而阶段四会强校验 `target_model == settings.music_model`，改错会导致生成失败 |
+
+### GenerationResponse（`/v1/history`、`POST /v1/generations`）
 
 | 字段 | 类型 | 来源 / 说明 |
 | --- | --- | --- |
 | `id` | string | **UUIDv7** 的 32 位小写 hex（时间有序）；同时是 `data/outputs/<id>/` 任务目录名 |
 | `title` / `prompt` / `lyrics` | string? | 润色后的标题、扩写描述、拍平后的分段歌词 |
-| `task_type` / `mode` / `model_variant` | string | 前端提交值 |
+| `task_type` / `mode` / `model_variant` | string | `task_type` / `mode` 为前端提交值；`model_variant` 由 `MUSIC_MODEL` 回填，响应侧固定为 `str` 以兼容历史 `base` / `turbo` / `shift`（见上节取值约定） |
 | `status` | string | `queued` / `processing` / `ready` / `failed` |
 | `instrumental` | bool | 是否纯音乐 |
 | `duration_seconds` / `bpm` / `key` / `time_signature` | number? / string? | 制作方案与策划阶段解析结果 |
-| `audio_url` | string? | 有本地音频时为 `/api/generations/{id}/audio` |
+| `audio_url` | string? | 有本地音频时为 `/v1/generations/{id}/audio` |
 | `cover_color` / `cover_icon` | string? | 由作品 ID 稳定推导，前端画渐变封面 |
 | `cover_image_url` | string? | 当前固定为 null（前端已移除封面上传） |
 | `error_message` | string? | 失败原因 |
@@ -152,7 +194,7 @@ X-Deduplicated: true
 | `created_at` / `updated_at` | string | ISO 8601 UTC |
 | `current_stage` / `style_prompt` | string? | 附加字段，前端可忽略 |
 
-`GET /api/generations/{id}` 额外返回 `stages: [{ stage, label, status, output_file, error, started_at, finished_at }]`。
+`GET /v1/generations/{id}` 额外返回 `stages: [{ stage, label, status, output_file, error, started_at, finished_at }]`。
 
 ## 五、数据模型（SQLite3）
 
@@ -208,6 +250,8 @@ X-Deduplicated: true
 | `MUSIC_API_BASE_URL` / `MUSIC_MODEL` | 见 `.env.example` | 生成接口与模型 |
 | `MUSIC_STUDIO_MOCK` | `false` | `true` 时全流程离线跑（本地 WAV + 桩数据），不消耗密钥 |
 | `ACE_STEP_HOST` / `ACE_STEP_PORT` | `0.0.0.0` / `8788` | 启动脚本沿用 |
+| `CORS_ORIGINS` | 空 | 额外允许的跨域来源，逗号分隔或 JSON 数组（见 3.4） |
+| `MUSIC_STUDIO_CORS_ORIGIN_REGEX` | 回环地址正则 | 默认放行 localhost / 127.0.0.1 / [::1] 任意端口；设为空可关闭 |
 | `MUSIC_STUDIO_DATA_DIR` | `<仓库根>/data` | 数据库与产物目录 |
 
 接口防护配置（完整注释见 `backend/app/.env.example`）：
@@ -226,10 +270,11 @@ X-Deduplicated: true
 ## 八、验证
 
 ```bash
-# 离线端到端冒烟：建表 / UUIDv7 / LLM / 五阶段 / 幂等 / 413-422-429 / 音频 / 级联删除（52 项）
+# 离线端到端冒烟：/v1 前缀 / CORS / 建表 / UUIDv7 / LLM / 五阶段 / 幂等 / 413-422-429 / 空描述 / 模型兜底 / 音频 / 级联删除（59 项；启用 DELETE 路由时 64 项）
 backend/.venv/Scripts/python.exe backend/tests/smoke_test.py
 
 # 启动真实服务
 uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
-curl http://localhost:8788/health
+curl http://localhost:8788/v1/health
+curl http://localhost:8788/v1/history
 ```

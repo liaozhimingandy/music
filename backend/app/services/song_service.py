@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..config import settings
-from ..constants import STAGE_LABELS, STATUS_FAILED, STATUS_QUEUED, USER_INPUT_FILE
+from ..constants import AUDIO_URL_TEMPLATE, STAGE_LABELS, STATUS_FAILED, STATUS_QUEUED, USER_INPUT_FILE
 from ..dal import ArtifactStore, SongDAL, StageDAL
 from ..ids import new_song_id
 from ..models import (
@@ -60,8 +60,10 @@ def request_fingerprint(payload: GenerationCreate, idempotency_key: str | None =
       统一布尔值、排除 ``metadata``（透传字段，不参与生成，且常含时间戳，
       纳入会导致每次请求都不同）。
 
-    规范化很重要：用户双击时两次提交的 prompt 可能只差一个换行，仍应命中。
-    """
+        规范化很重要：用户双击时两次提交的 prompt 可能只差一个换行，仍应命中。
+        ``model_variant`` 前端通常不传，这里按实际生效的配置值归一化，避免
+        「传值」与「不传值」的同一请求算出两个不同指纹。
+        """
     if idempotency_key and idempotency_key.strip():
         return hashlib.sha256(f"idempotency-key:{idempotency_key.strip()}".encode("utf-8")).hexdigest()
 
@@ -69,7 +71,7 @@ def request_fingerprint(payload: GenerationCreate, idempotency_key: str | None =
         "title": (payload.title or "").strip(),
         "task_type": payload.task_type,
         "mode": payload.mode,
-        "model_variant": payload.model_variant,
+        "model_variant": payload.model_variant or settings.music_model,
         "inputs": {
             "prompt": (payload.inputs.prompt or "").strip(),
             "lyrics": (payload.inputs.lyrics or "").strip(),
@@ -132,10 +134,13 @@ class SongService:
 
         三处需要特别留意：
         * ``musical_key`` 映射成前端的 ``key``；
+        * ``model_variant`` 直接透传（响应模型是 str，兼容历史 base/turbo/shift
+          与 settings.music_model 配置的模型 ID），不再做白名单改写，避免
+          枚举变更导致列表接口 500；
         * ``audio_url`` 只有在本地音频文件确实存在时才生成，避免前端
-          拿到 404 的播放地址；外部已有 URL 时原样透传；
-        * ``task_type`` / ``model_variant`` 做白名单兜底，历史脏数据不会
-          触发 Pydantic Literal 校验错误导致整个列表接口失败。
+          拿到 404 的播放地址；路径模板来自 constants.AUDIO_URL_TEMPLATE，
+          跟着 API 版本前缀走，外部已有 URL 时原样透传。
+        ``task_type`` 仍做白名单兜底，历史脏数据不会让响应模型校验失败。
 
         文件存在性检查走 to_thread，避免 stat 阻塞 event loop。
         """
@@ -143,7 +148,7 @@ class SongService:
         if record.audio_path:
             exists = await asyncio.to_thread(Path(record.audio_path).is_file)
             if exists:
-                audio_url = f"/api/generations/{record.id}/audio"
+                audio_url = AUDIO_URL_TEMPLATE.format(song_id=record.id)
         if audio_url is None and record.audio_url:
             audio_url = record.audio_url
         return GenerationResponse(
@@ -151,7 +156,7 @@ class SongService:
             title=record.title,
             task_type=record.task_type if record.task_type in ("text2music", "cover", "repaint") else "text2music",
             mode=record.mode,
-            model_variant=record.model_variant if record.model_variant in ("base", "turbo", "shift") else "turbo",
+            model_variant=record.model_variant or "turbo",
             status=record.status,
             prompt=record.prompt,
             lyrics=record.lyrics,
@@ -173,7 +178,7 @@ class SongService:
         )
 
     async def list_history(self, limit: int = 25) -> list[GenerationResponse]:
-        """作品库列表（倒序），供 GET /api/history 轮询。"""
+        """作品库列表（倒序），供 GET /v1/history 轮询。"""
         records = await self.songs.list(limit)
         return [await self.to_response(item) for item in records]
 
@@ -265,7 +270,7 @@ class SongService:
                 title=(payload.title or "").strip() or _fallback_title(prompt),
                 task_type=payload.task_type,
                 mode=payload.mode,
-                model_variant=payload.model_variant,
+                model_variant=payload.model_variant or self.config.music_model,
                 status=STATUS_QUEUED,
                 prompt=prompt,
                 lyrics=lyrics,

@@ -11,11 +11,13 @@ FastAPI + SQLite3 的 AI 音乐创作后端。把一段创作灵感经过五个�
 backend/app/
 ├── main.py            # FastAPI 入口（async lifespan 建表/清理、CORS、路由）
 ├── config.py          # pydantic-settings 配置（密钥只在 .env）
-├── constants.py       # 阶段名、产物名、状态码
+├── constants.py       # 阶段名、产物名、状态码、API 版本前缀 /v1
 ├── ids.py             # 全局 UUIDv7 生成器（时间有序、同毫秒单调递增）
 ├── deps.py            # FastAPI 依赖层：限流 / 请求体 / 客户端标识 / 路径校验
-├── routers/           # 接口层：async 端点 + Depends 注入服务
-│   ├── history.py  generations.py  llm.py  meta.py
+├── middleware.py      # 异常兜底：500 也带 CORS 头（在 CORS 内层）
+├── routers/           # 接口层：api_v1 聚合路由 + async 端点 + Depends 注入服务
+│   ├── __init__.py    # api_v1 = APIRouter(prefix=API_V1_PREFIX)，一次注册全部子路由
+│   ├── history.py  generations.py  llm.py  meta.py（只写不带版本号的相对路径）
 ├── services/          # 业务层（不反向依赖 routers）
 │   ├── runtime.py            # 单例装配 + asyncio.Task/Semaphore 调度
 │   ├── song_service.py       # 作品 CRUD / 响应映射 / 幂等去重 / 并发闸门
@@ -35,6 +37,12 @@ backend/app/
 ```
 
 依赖方向严格单向：`routers → service → dal → model`。`deps.py` 属于接口层，负责校验与策略判断；`dal` 不含业务判断，`service` 不直接写 SQL。
+
+## 接口版本前缀
+
+所有接口（含健康检查）统一挂在 `/v1` 下：`/v1/health`、`/v1/history`、`/v1/llm`、`/v1/generations/*`。前缀常量 `API_V1_PREFIX` 只在 `constants.py` 定义，`routers/__init__.py` 用它构造 `api_v1` 聚合路由，`main.py` 只注册这一个路由；各子 router 的 `prefix` 一律不含版本号。前端 `VITE_APP_API_BASE_URL`、Vite 代理与 `audio_url` 模板同步使用 `/v1`。旧 `/api/*` 与无前缀 `/health` 已移除；未来升 v2 时新增一个聚合路由即可，v1 保持不变。
+
+**跨域**：`CORSMiddleware` 默认放行所有本机回环来源（任意端口），生产用 `CORS_ORIGINS` 显式列域名。`middleware.py` 的 `UnhandledErrorMiddleware` 挂在 CORS 内层，把未捕获异常转成带 CORS 头的 JSON 500 —— 否则 Starlette 最外层的 `ServerErrorMiddleware` 生成纯文本 500，浏览器会把后端异常误报成跨域错误。详见 [docs/api.md](../docs/api.md) 3.4。
 
 ## 代码导览（给维护者）
 
@@ -57,7 +65,8 @@ backend/app/
 | 调整防护阈值 | `config.py` 默认值 + `.env.example` + `docs/api.md` 配置表 |
 | 调整提示词变量 | `stage_steps.py` 里的 `get_stage(...)` 参数 + `prompts/<阶段>/user.md`（模板由业务侧维护） |
 | 新增生成阶段 | `constants.py` 注册阶段名与产物名 → `stage_steps.py` 加阶段函数 → `workflow_service.run()` 串入流程 |
-| 新增接口 | `models/schemas.py` 定义模型 → `routers/` 加 `async def` + `Depends` → `deps.py` 选防护策略 → `docs/api.md` 同步 |
+| 新增接口 | `models/schemas.py` 定义模型 → `routers/` 加 `async def` + `Depends`（相对路径，不写 /v1）→ `deps.py` 选防护策略 → `docs/api.md` 同步 |
+| 升级 API 版本 | `constants.py` 加前缀 → `routers/__init__.py` 新建聚合路由 → `main.py` 注册 → 前端 `API_BASE_URL` / Vite 代理同步 |
 | 调整轮询 / 播放行为 | 前端 `pages/StudioPage.vue`、`services/api.ts`、`common/config.ts` |
 
 **红线**：
@@ -104,7 +113,7 @@ backend/.venv/Scripts/uvicorn app.main:app --app-dir backend --host 0.0.0.0 --po
 
 依赖仅 8 个：fastapi / uvicorn / pydantic / pydantic-settings / python-dotenv / httpx / Jinja2 / aiosqlite，无需 torch 或本地模型权重。
 
-交互式文档：`http://localhost:8788/docs`；健康检查：`/health`。
+交互式文档：`http://localhost:8788/docs`（文档端点不带版本号）；健康检查：`/v1/health`。
 Windows 也可用 `scripts/start.bat` 一次启动前后端。
 
 ## 离线演示
@@ -123,7 +132,7 @@ MUSIC_STUDIO_MOCK=true
 backend/.venv/Scripts/python.exe backend/tests/smoke_test.py
 ```
 
-冒烟测试用临时数据库 + mock 模式，52 项断言覆盖：建表与旧库补列、UUIDv7 单调性、三个 LLM 任务、全异步五阶段推进、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 防护、并发闸门顺序、音频下载、级联删除与前端字段契约。
+冒烟测试用临时数据库 + mock 模式，59 项断言（启用 DELETE 路由时为 64 项）覆盖：/v1 版本前缀与 CORS、旧路径下线、建表与旧库补列、UUIDv7 单调性、三个 LLM 任务、全异步五阶段推进、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 与空描述防护、MUSIC_MODEL 配置兜底、并发闸门顺序、500 响应的 CORS 头、音频下载、级联删除与前端字段契约。
 
 ## 数据
 

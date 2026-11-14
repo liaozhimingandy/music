@@ -16,12 +16,16 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# 枚举值来自前端的下拉项 / 任务类型，勿随意改名。
-TaskType = Literal["text2music", "cover", "repaint"]
-ModelVariant = Literal["base", "turbo", "shift"]
+# 枚举值来自前端的任务类型，勿随意改名。
+TaskType = Literal["text2music",]
 LLMTask = Literal["prompt", "lyrics", "title"]
+
+# 音乐模型 ID 不在这里定义枚举：唯一来源是 config.music_model（MUSIC_MODEL
+# 环境变量，默认 ACE-Step/acestep-v15-xl-sft），它既是 MusicProvider 提交给
+# ModelScope 的 model 参数，也是 prompts/music/system.md 里写死的 target_model。
+# 前端不传 model_variant 时由 SongService 用配置兜底，避免两边各写一份硬编码。
 
 # 与前端 CreatePanel.vue 的 500 字限制保持一致；服务端必须再校一次，
 # 因为绕过页面直接调接口时前端的 maxlength 不起作用。
@@ -52,14 +56,28 @@ class GenerationInputs(StrictRequestModel):
 
 
 class GenerationCreate(StrictRequestModel):
-    """POST /api/generations 请求体。创建后立刻返回 queued，不等待生成完成。"""
+    """POST /v1/generations 请求体。创建后立刻返回 queued，不等待生成完成。"""
 
     title: str | None = Field(default=None, max_length=MAX_TITLE_LENGTH)  # 初值；流程后可能被润色结果覆盖
     task_type: TaskType = "text2music"
     mode: str = Field(default="simple", max_length=32)
-    model_variant: ModelVariant = "turbo"
+    # 可选：仅作展示标记，真正生效的模型由 settings.music_model 决定。
+    # 留空时 SongService 会用配置值回填；请求侧不写死 Literal，换模型无需改契约。
+    model_variant: str | None = Field(default=None, max_length=128)
     inputs: GenerationInputs = Field(default_factory=GenerationInputs)
     metadata: dict[str, Any] = Field(default_factory=dict)  # 透传的扩展信息
+
+    @model_validator(mode="after")
+    def _require_prompt(self) -> GenerationCreate:
+        """描述必填：前端已禁用空输入，这里挡住绕过页面直接 POST 的调用。
+
+        放在 GenerationCreate 而不是 GenerationInputs 上，才能覆盖「完全不传
+        inputs」时 default_factory 的产物。不提前拦的话空描述会一路走到后台
+        planning 阶段才报错，白占一个活跃任务名额并留下一条 failed 作品。
+        """
+        if not (self.inputs.prompt or "").strip():
+            raise ValueError("歌词 / 歌曲描述不能为空")
+        return self
 
     @field_validator("metadata")
     @classmethod
@@ -71,7 +89,7 @@ class GenerationCreate(StrictRequestModel):
 
 
 class StageResponse(BaseModel):
-    """单个阶段的进度，用于 GET /api/generations/{id}/stages 与详情响应。"""
+    """单个阶段的进度，用于 GET /v1/generations/{id}/stages 与详情响应。"""
 
     stage: str
     label: str                        # 中文展示名，来自 constants.STAGE_LABELS
@@ -83,7 +101,7 @@ class StageResponse(BaseModel):
 
 
 class GenerationResponse(BaseModel):
-    """GET /api/history、POST /api/generations 的作品结构（前端强依赖）。
+    """GET /v1/history、POST /v1/generations 的作品结构（前端强依赖）。
 
     ``key`` 对应数据库列 ``musical_key``；``audio_url`` 为相对路径，前端
     直接拼到 <audio src> 上，离线演示模式下由 Vite 代理到后端。
@@ -93,7 +111,11 @@ class GenerationResponse(BaseModel):
     title: str | None = None
     task_type: TaskType = "text2music"
     mode: str = "simple"
-    model_variant: ModelVariant = "turbo"
+    # 响应侧固定用 str：songs 表里既有历史值（base / turbo / shift），也有
+    # settings.music_model 配置的真实模型 ID。若这里用严格 Literal，任何一条
+    # 旧记录都会让整个 /v1/history 抛 ValidationError -> 500（浏览器会误报成
+    # 跨域错误）。换个 MUSIC_MODEL 也不需要改这里。
+    model_variant: str = "turbo"
     status: str = "queued"            # queued / processing / ready / failed
     prompt: str | None = None
     lyrics: str | None = None
@@ -121,7 +143,7 @@ class GenerationDetailResponse(GenerationResponse):
 
 
 class LLMTaskRequest(StrictRequestModel):
-    """POST /api/llm 请求体：供「AI 扩写描述 / 生成歌词 / 起标题」三个按钮复用。"""
+    """POST /v1/llm 请求体：供「AI 扩写描述 / 生成歌词 / 起标题」三个按钮复用。"""
 
     task: LLMTask
     seed_prompt: str = Field(..., max_length=MAX_SEED_LENGTH)  # 用户已输入的描述，作为扩写种子
@@ -130,7 +152,7 @@ class LLMTaskRequest(StrictRequestModel):
 
 
 class LLMTaskResponse(BaseModel):
-    """POST /api/llm 响应体；前端只取 ``output`` 回填到对应输入框。"""
+    """POST /v1/llm 响应体；前端只取 ``output`` 回填到对应输入框。"""
 
     task: str
     output: str
@@ -139,9 +161,15 @@ class LLMTaskResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """GET /health 响应体；前端据此显示「后端已连接 / 演示模式」。"""
+    """GET /v1/health 响应体；前端据此显示「后端已连接 / 演示模式」。
+
+    ``music_model`` 是当前实际生效的音乐模型 ID（来自 MUSIC_MODEL 配置），
+    也是 ``GenerationCreate.model_variant`` 唯一合法的取值来源——前端想查
+    「有哪些模型」读这里即可，不必自己维护一份枚举。
+    """
 
     status: str
     app: str
     mock_mode: bool
     database: str
+    music_model: str | None = None

@@ -57,7 +57,7 @@ cd frontend && npm run dev
 
 Windows 可用 `scripts/start.bat`、macOS/Linux 用 `scripts/start.sh` 一次启动两端。
 
-打开 http://localhost:5175 。后端交互文档在 http://localhost:8788/docs ，健康检查在 `/health`。
+打开 http://localhost:5175 。后端交互文档在 http://localhost:8788/docs ，健康检查在 `/v1/health`。
 
 ## 离线演示模式
 
@@ -76,7 +76,7 @@ backend/.venv/Scripts/python.exe backend/tests/smoke_test.py   # Windows
 # backend/.venv/bin/python backend/tests/smoke_test.py         # macOS / Linux
 ```
 
-该测试使用临时数据库 + mock 模式，52 项断言覆盖建表与旧库补列、UUIDv7 单调性、LLM 三任务、全异步五阶段、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 防护、音频下载与级联删除。
+该测试使用临时数据库 + mock 模式，59 项断言（启用 DELETE 路由时为 64 项）覆盖 /v1 版本前缀与 CORS、建表与旧库补列、UUIDv7 单调性、LLM 三任务、全异步五阶段、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 与空描述防护、MUSIC_MODEL 配置兜底、音频下载与级联删除。
 
 ## 数据与重置
 
@@ -88,10 +88,11 @@ backend/.venv/Scripts/python.exe backend/tests/smoke_test.py   # Windows
 
 | 现象 | 处理 |
 | --- | --- |
-| 前端显示「演示模式」 | 后端 8788 未启动；或 Vite 的 `/api` 代理目标不对（见 `frontend/vite.config.ts`） |
+| 前端显示「演示模式」 | 后端 8788 未启动；或 Vite 的 `/v1` 代理目标不对（见 `frontend/vite.config.ts`，可用 `VITE_API_PROXY_TARGET` 改端口） |
+| 浏览器报 `No 'Access-Control-Allow-Origin'` | 直连后端是不同源：先 `curl -i -H "Origin: http://127.0.0.1:5177" http://localhost:8000/v1/health` 看 CORS 头。默认放行所有回环来源；若实际是纯文本 500，说明后端异常被误报成跨域（查后端日志）。也可把 `VITE_APP_API_BASE_URL` 设回 `/v1` 走同源代理彻底避开 |
 | 提交生成返回 429 | 触发了限流或活跃任务上限，稍后按 `Retry-After` 重试；阈值见 `backend/app/.env.example`（生产不建议关闭总开关） |
 | 重复点「开始生成」产生了两条 | 正常应命中幂等去重（响应带 `X-Deduplicated: true`）；确实要再生成一次可加 `?force=true` |
-| 创建作品后一直「生成中」 | 查看后端日志；`GET /api/generations/{id}/stages` 可看卡在哪个阶段 |
+| 创建作品后一直「生成中」 | 查看后端日志；`GET /v1/generations/{id}/stages` 可看卡在哪个阶段 |
 | 状态变「生成失败」 | 读 `error_message`；常见原因是密钥无效、网络超时、模型返回非 JSON |
 | 想中断后继续 | `data/outputs/<id>/` 下的阶段 JSON 会跳过重跑；音乐任务 `music_task.json` 保存了 `task_id` |
 | 端口冲突 | 改 `ACE_STEP_PORT`，或前端开发服务器加 `--port 5177` |

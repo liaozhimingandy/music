@@ -1,4 +1,7 @@
-"""POST /api/llm：前端「AI 扩写描述 / 写词 / 起标题」。"""
+"""POST /v1/llm：前端「AI 扩写描述 / 写词 / 起标题」。
+
+``/v1`` 由 routers/__init__.py 的聚合路由统一添加，这里只写相对路径。
+"""
 
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ from ..services.llm_service import LLMService
 from ..services.runtime import get_llm_service
 
 router = APIRouter(
-    prefix="/api/llm",
+    prefix="/llm",
     tags=["llm"],
     dependencies=[Depends(reject_oversized_body), Depends(enforce_llm_policy)],
 )

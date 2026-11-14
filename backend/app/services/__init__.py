@@ -11,7 +11,7 @@
 * ``stage_steps``     五个可独立复用的纯阶段函数（async）
 * ``workflow_service`` 顺序编排五阶段并回写进度（async）
 * ``song_service``    作品 CRUD、前端响应映射、幂等去重（async）
-* ``llm_service``     /api/llm 三个轻量任务（async）
+* ``llm_service``     /v1/llm 三个轻量任务（async）
 * ``rate_limiter``    进程内滑动窗口限流（async），供 deps.py 调用
 * ``runtime``         单例装配点与生命周期（async），FastAPI Depends 从这里取服务
 * ``cover_theme``     由 ID 推导封面配色（纯函数，同步）

@@ -7,6 +7,16 @@
 
 from __future__ import annotations
 
+# ---- HTTP API 版本前缀（唯一来源）----
+# 所有业务接口（含健康检查）都挂在 routers/__init__.py 的 api_v1 聚合路由下，
+# 最终路径 = API_V1_PREFIX + 子路由相对路径，例如 /v1/history。
+# 升级 v2 时新增一个 APIRouter(prefix="/v2") 即可，不要改各 router 的 prefix。
+API_V1_PREFIX = "/v1"
+
+# 本地音频的对外相对地址；SongService.to_response 生成 audio_url 时用，
+# 前端再由 services/api.ts 的 resolveAudioUrl() 解析成可请求地址。
+AUDIO_URL_TEMPLATE = f"{API_V1_PREFIX}/generations/{{song_id}}/audio"
+
 # 五阶段流程顺序（与 music.py 原型一致）
 # 顺序即执行顺序，也是 song_stages 表预置记录的顺序；调整会改变进度展示。
 STAGE_PLANNING = "planning"
@@ -33,7 +43,7 @@ STAGE_OUTPUTS: dict[str, str] = {
     STAGE_MUSIC_GENERATION: "music_result.json",
 }
 
-# 阶段中文名，用于 GET /api/generations/{id}/stages 的 label 字段。
+# 阶段中文名，用于 GET /v1/generations/{id}/stages 的 label 字段。
 STAGE_LABELS: dict[str, str] = {
     STAGE_PLANNING: "歌曲策划",
     STAGE_LYRICS: "歌词创作",

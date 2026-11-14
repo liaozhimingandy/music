@@ -49,7 +49,7 @@ class SongDAL:
         return SongRecord.from_row(row) if row else None
 
     async def list(self, limit: int = 25) -> list[SongRecord]:
-        """按创建时间倒序列出作品，供 /api/history 渲染作品库。
+        """按创建时间倒序列出作品，供 /v1/history 渲染作品库。
 
         limit 钳制在 1~200，避免前端误传超大值拖慢接口；排序依赖
         idx_songs_created_at 索引。路由层还会用 Query(le=100) 再校一次。

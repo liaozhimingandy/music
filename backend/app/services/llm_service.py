@@ -4,7 +4,7 @@
 **不改动 backend/app/prompts 下的任何模板**。
 未配置 API Key 或开启 MUSIC_STUDIO_MOCK 时使用本地兜底，保证界面可用。
 
-前端对应位置：CreatePanel.vue 的「AI 扩写描述」按钮调用 POST /api/llm。
+前端对应位置：CreatePanel.vue 的「AI 扩写描述」按钮调用 POST /v1/llm。
 ``run`` 为 async，真实模式下 LLM 请求在 event loop 上等待，不阻塞其它接口。
 """
 

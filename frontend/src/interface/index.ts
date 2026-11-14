@@ -5,13 +5,20 @@
  * - GenerationResponse 字段改名必须同步后端 GenerationResponse 与
  *   SongService.to_response()，否则作品库会渲染出 undefined。
  * - status 只用 queued / processing / ready / failed，文案映射在 common/utils.ts。
- * - key 对应数据库的 musical_key；audio_url 是相对 /api 的路径或 blob URL，
+ * - key 对应数据库的 musical_key；audio_url 是 /v1/... 相对路径、blob 或外链 URL，
  *   为空表示音频尚未生成，播放器会禁用播放按钮。
  * - metadata 是不定型扩展字段，离线演示模式把 _queuedAt 暂存在这里。
  */
 
-export type TaskType = "text2music" | "cover" | "repaint";
-export type ModelVariant = "base" | "turbo" | "shift";
+export type TaskType = "text2music";
+/**
+ * 模型标识不在这里枚举：唯一来源是后端 `MUSIC_MODEL` 配置
+ * （backend/app/config.py，默认 ACE-Step/acestep-v15-xl-sft），
+ * 可通过 GET /v1/health 的 music_model 字段读取。
+ * 提交时前端不传 model_variant，由 SongService 用配置回填；
+ * 响应里还可能是历史演示数据 base / turbo / shift，所以放宽成 string。
+ */
+export type ModelVariant = string;
 
 /** 左栏「简单创作」表单的值 */
 export type CreateFormValues = {
@@ -19,20 +26,20 @@ export type CreateFormValues = {
   instrumental: boolean;
 };
 
-/** POST /api/generations 请求体（前端只提交简单模式所需字段） */
+/** POST /v1/generations 请求体（只提交用户原始输入；标题/歌词/模型都由后端决定） */
 export type GenerationCreate = {
-  title: string;
+  title?: string;
   task_type: TaskType;
   mode: "simple";
-  model_variant: ModelVariant;
+  model_variant?: string;
   inputs: {
     prompt: string;
-    lyrics: string;
+    lyrics?: string;
     instrumental: boolean;
   };
 };
 
-/** GET /api/history、POST /api/generations 返回的作品 */
+/** GET /v1/history、POST /v1/generations 返回的作品 */
 export type GenerationResponse = {
   id: string;
   title?: string | null;
@@ -57,7 +64,7 @@ export type GenerationResponse = {
   updated_at: string;
 };
 
-/** POST /api/llm 请求与响应 */
+/** POST /v1/llm 请求与响应 */
 export type LLMTaskRequest = {
   task: "prompt" | "lyrics" | "title";
   seed_prompt: string;

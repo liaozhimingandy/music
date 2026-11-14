@@ -12,7 +12,8 @@
 - 文件布局参考 `vue_tuiwen`：`common/ interface/ services/ pages/ components/` 分层，`@` 路径别名，`.env.*` 环境变量，三份 tsconfig。
 - 请求层统一走 **axios 封装**（`src/services/index.ts`），带请求/响应拦截器与错误归一化；后端离线时自动降级到演示数据。
 - **GitHub Pages 部署自动化**：push 到 `main` 即自动构建并发布前端静态站。
-- 后端按 **routers → service → dal → model** 分层，**全链路异步**（asyncio + aiosqlite + httpx.AsyncClient）：`POST /api/generations` 立即返回 `queued`，后台 `asyncio.Task` 跑五阶段并逐阶段写 SQLite，前端 2 秒轮询 `/api/history` 看进度；服务通过 FastAPI `Depends` 注入，作品 ID 用时间有序的 **UUIDv7**。
+- 后端按 **routers → service → dal → model** 分层，**全链路异步**（asyncio + aiosqlite + httpx.AsyncClient）：`POST /v1/generations` 立即返回 `queued`，后台 `asyncio.Task` 跑五阶段并逐阶段写 SQLite，前端 2 秒轮询 `/v1/history` 看进度；服务通过 FastAPI `Depends` 注入，作品 ID 用时间有序的 **UUIDv7**。
+- 后端接口统一 **`/v1` 版本前缀**（含 `/v1/health`）：前缀常量只在 `backend/app/constants.py` 定义，`routers/__init__.py` 聚合注册；前端 `API_BASE_URL`、Vite 代理、`audio_url` 全部同步使用 `/v1`，旧 `/api/*` 已下线。
 - 生成接口内置**幂等去重**（内容指纹 / `Idempotency-Key`，重复提交直接返回已有作品）与**接口防护**（滑动窗口限流、活跃任务上限、请求体大小、字段长度与路径 ID 白名单），防双击与恶意刷接口。
 - 默认端口：后端 `8788`，前端 `5175`（刻意避开 8000）。
 
@@ -31,7 +32,7 @@ npm run dev            # http://localhost:5175
 ```bash
 npm run type-check     # vue-tsc 类型检查
 npm run build          # 类型检查 + vite build
-npm run preview        # http://localhost:5175，同样代理 /api 到 8788
+npm run preview        # http://localhost:5175，同样代理 /v1 到 8788
 ```
 
 启动后端（Python 3.10+，**不需要本地模型权重**，只需 `.env` 里的云端 API 密钥）：
@@ -52,9 +53,16 @@ backend/.venv/Scripts/uvicorn app.main:app --app-dir backend --host 0.0.0.0 --po
 
 完整步骤见 [安装指南](./docs/installation.md)，接口说明见 [后端接口清单](./docs/api.md)。
 
+## 生成链路与模型配置
+
+- 点「开始生成」**只发一次** `POST /v1/generations`，请求体只带用户原始描述；后端五阶段自动完成策划 / 写词 / 润色 / 制作方案 / 音频，前端轮询 `GET /v1/history` 看进度。
+- `POST /v1/llm` 仅服务「AI 扩写描述」等用户主动点击的辅助按钮，不在生成主链路里（后端流程已经包含 LLM 步骤，前端重复调用只会白耗配额）。
+- 音乐模型 ID 由后端 `MUSIC_MODEL`（`backend/app/config.py`）唯一决定，默认 `ACE-Step/acestep-v15-xl-sft`；可用 `GET /v1/health` 的 `music_model` 查询。前端不维护模型枚举，提交时也不传 `model_variant`。
+- 描述为空 / 全空格时生成按钮禁用，服务端另以 `422` 兜底。
+
 ## GitHub Pages 部署
 
-工作流：[`.github/workflows/deploy-pages.yml`](./.github/workflows/deploy-pages.yml)。
+工作流：[`.github/workflows/deploy-github-pages.yml`](./.github/workflows/deploy-pages.yml)。
 
 **一次性设置**：仓库 `Settings → Pages → Build and deployment → Source` 选择 **GitHub Actions**。不需要配置任何 token 或 secret（使用官方 Pages Actions 的 OIDC 权限）。
 
@@ -67,7 +75,7 @@ backend/.venv/Scripts/uvicorn app.main:app --app-dir backend --host 0.0.0.0 --po
 
 **base 路径**：项目页必须带仓库名前缀，CI 会注入 `VITE_BASE_PATH=/${{ github.event.repository.name }}/` 覆盖（环境变量优先于 `.env.production`）。本地构建默认 `/`，保证 `npm run preview` 可直接查看；fork 仓库无需改配置。若绑定自定义域名，把 `VITE_BASE_PATH` 设为 `/` 即可。
 
-> Pages 是纯静态托管，没有 FastAPI 后端，因此线上页面会**自动进入演示模式**（用本地示例数据展示完整生成流程）。若要连真实后端，把 `.env.production` 的 `VITE_APP_API_BASE_URL` 改成完整地址（如 `https://api.example.com/api`），并确保后端开启 CORS。
+> Pages 是纯静态托管，没有 FastAPI 后端，因此线上页面会**自动进入演示模式**（用本地示例数据展示完整生成流程）。若要连真实后端，把 `.env.production` 的 `VITE_APP_API_BASE_URL` 改成完整地址（如 `https://api.example.com/v1`），并确保后端开启 CORS；同源反代时填 `/v1` 即可。
 
 ## 前端结构
 
@@ -76,7 +84,7 @@ frontend/
 ├── .env.development        # 开发环境变量
 ├── .env.production         # 生产环境变量（含 Pages base）
 ├── index.html
-├── vite.config.ts          # 端口、/api 代理、@ 别名、Pages base
+├── vite.config.ts          # 端口、/v1 代理、@ 别名、Pages base
 ├── tailwind.config.js      # 设计 token，关闭 preflight 以兼容 TDesign
 ├── postcss.config.js
 ├── tsconfig.json           # 引用 app / node 两份配置
@@ -118,7 +126,7 @@ frontend/
 | 文件 | 职责 |
 | --- | --- |
 | `services/index.ts` | 创建 axios 实例（baseURL / 超时 / JSON 头），请求拦截统一注入鉴权头，响应拦截直接返回 `response.data` 并归一化错误；导出 `get` / `post` / `del` 与 `isConnectionError` |
-| `services/api.ts` | `apiUrls` 集中管理路径，业务接口函数；启动时探测 `GET /api/history`，返回数组才判定后端在线，否则静默降级到 `demo.ts` |
+| `services/api.ts` | `apiUrls` 集中管理路径，业务接口函数；启动时探测 `GET /v1/history`，返回数组才判定后端在线，否则静默降级到 `demo.ts` |
 | `services/demo.ts` | 内存示例数据与生成流程模拟 |
 
 所有业务请求传 `silent: true`，避免后端离线（本地预览 / Pages）时全局错误提示不断弹出；业务错误（4xx）仍会原样抛给调用方。
@@ -157,10 +165,14 @@ backend/app/
 
 | 变量 | 开发默认 | 说明 |
 | --- | --- | --- |
-| `VITE_APP_API_BASE_URL` | `/api` | 后端接口前缀，开发由 Vite 代理到 8788 |
+| `VITE_APP_API_BASE_URL` | `/v1` | 后端 v1 接口前缀。走 Vite 同源代理填 `/v1`；直连后端填完整地址 + `/v1`（如 `http://localhost:8000/v1`），由后端 CORS 放行 |
+| `VITE_API_PROXY_TARGET` | `http://127.0.0.1:8788` | Vite dev / preview 代理的后端地址；自己换端口启动后端时同步改这里 |
+| `CORS_ORIGINS` | 空 | 后端额外允许的跨域来源，逗号分隔或 JSON 数组；默认已放行全部本机回环来源 |
 | `VITE_APP_IS_DEBUG` | `True` / `False` | 是否输出调试日志 |
 | `VITE_BASE_PATH` | `/` | Vite `base`，GitHub Pages 项目页需 `/<仓库名>/` |
 | `VITE_APP_BUILD` | — | CI 注入的构建号 |
+
+> **跨域排错**：直连后端（如 `5177 → 8000`）是不同源。后端默认放行 `localhost` / `127.0.0.1` / `[::1]` 的**任意端口**，且 500 等错误响应也带 CORS 头。若浏览器仍报 `No 'Access-Control-Allow-Origin'`，先用 `curl -i -H "Origin: http://127.0.0.1:5177" http://localhost:8000/v1/health` 确认响应头；如果实际是纯文本 500，说明是后端异常被浏览器误报成跨域，去看后端日志。生产环境请在 `.env` 里用 `CORS_ORIGINS` 显式列出前端域名。
 
 ## 仓库结构
 

@@ -5,7 +5,7 @@
 
 * ``reject_oversized_body``  Content-Length 超上限 -> 413（router 级统一挂）
 * ``enforce_read_policy``    读接口滑动窗口限流 -> 429
-* ``enforce_llm_policy``     /api/llm 限流（会消耗 LLM 额度，阈值更严）
+* ``enforce_llm_policy``     /v1/llm 限流（会消耗 LLM 额度，阈值更严）
 * ``enforce_generation_policy`` 生成接口限流（并发闸门在 SongService 去重之后）
 
 ``client_key`` 把客户端 IP 做哈希后既用于限流分桶，也写进 songs 表的
@@ -117,7 +117,7 @@ async def enforce_read_policy(request: Request) -> None:
 
 
 async def enforce_llm_policy(request: Request) -> None:
-    """/api/llm 限流：这三个按钮会真实消耗 LLM 额度，阈值比读接口严。"""
+    """/v1/llm 限流：这三个按钮会真实消耗 LLM 额度，阈值比读接口严。"""
     try:
         await get_limiter("llm").check(client_key(request))
     except RateLimitExceeded as exc:

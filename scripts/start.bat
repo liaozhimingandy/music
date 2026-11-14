@@ -29,7 +29,7 @@ echo Starting Music Studio frontend on %ACE_STEP_HOST%:%ACE_STEP_UI_PORT%
 start "Music Studio Frontend" cmd /k "cd /d "%ROOT_DIR%\frontend" && npm run dev -- --host %ACE_STEP_HOST% --port %ACE_STEP_UI_PORT%"
 
 echo.
-echo Backend:  http://localhost:%ACE_STEP_PORT%/health
+echo Backend:  http://localhost:%ACE_STEP_PORT%/v1/health
 echo API docs: http://localhost:%ACE_STEP_PORT%/docs
 echo Frontend: http://localhost:%ACE_STEP_UI_PORT%
 echo 离线演示：在 backend\app\.env 中设置 MUSIC_STUDIO_MOCK=true

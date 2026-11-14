@@ -7,6 +7,10 @@
  * 描述上限 MAX_PROMPT_LENGTH = 500：模板用 maxlength 拦键盘输入，
  * 另用 watch + clamp() 兜底程序赋值 / 粘贴的超长文本（原生属性能被绕过）。
  * 纯音乐开关开启后，父组件的 handleCreate 会跳过写词这一步。
+ *
+ * 描述为空 / 过短不允许提交：canSubmit 控制按钮 disabled，submit() 再校验
+ * 一次，后端 GenerationCreate 还有第三道 422 校验（防绕过 UI 直接调接口）。
+ * AI 扩写按钮 / 纯音乐开关当前未挂载在模板里，相关 props 与回调保留备用。
  */
 import { computed, ref, watch } from "vue";
 import { Button as TButton, MessagePlugin, Switch as TSwitch, Textarea as TTextarea } from "tdesign-vue-next";
@@ -28,9 +32,14 @@ const prompt = ref("");
 const instrumental = ref(false);
 const expanding = ref(false);
 
+/** 提交门槛：描述至少 6 字（>5）。按钮与 submit() 共用，改这一处即可 */
+const MIN_PROMPT_LENGTH = 5;
+
 /** 字数计数与「接近上限」提示：达到 90% 时输入框与提示文字转为警示态 */
 const charCount = computed(() => prompt.value.length);
 const nearLimit = computed(() => charCount.value >= MAX_PROMPT_LENGTH * 0.9);
+/** 描述过短或正在提交时禁用「开始生成」 */
+const canSubmit = computed(() => prompt.value.trim().length > MIN_PROMPT_LENGTH && !props.isSubmitting);
 
 function clamp(value: string): string {
   return value.slice(0, MAX_PROMPT_LENGTH);
@@ -55,7 +64,13 @@ async function handleExpand() {
 }
 
 function submit() {
-  emit("submit", { prompt: clamp(prompt.value), instrumental: instrumental.value });
+  const value = clamp(prompt.value).trim();
+  // 按钮已禁用，这里兜底程序化触发与全空格输入；阈值与 canSubmit 保持一致
+  if (value.length <= MIN_PROMPT_LENGTH) {
+    MessagePlugin.warning(`请至少输入 ${MIN_PROMPT_LENGTH + 1} 个字的歌词或歌曲描述`);
+    return;
+  }
+  emit("submit", { prompt: value, instrumental: instrumental.value });
 }
 </script>
 
@@ -85,36 +100,17 @@ function submit() {
           :status="nearLimit ? 'warning' : 'default'"
         />
         <p class="text-xs mt-2" :class="nearLimit ? 'text-brand-600' : 'text-subtle'">
-          {{ nearLimit ? `已接近字数上限（${charCount} / ${MAX_PROMPT_LENGTH}）` : "简单创作会自动扩写描述、生成歌词并起标题。" }}
+          {{ nearLimit ? `已接近字数上限（${charCount} / ${MAX_PROMPT_LENGTH}）` : "提交后由后端自动完成策划、写词与编曲。" }}
         </p>
       </div>
-
-      <div>
-        <TButton
-          variant="outline"
-          size="small"
-          :loading="expanding"
-          :disabled="!prompt.trim() || expanding"
-          @click="handleExpand"
-        >
-          <span class="inline-flex items-center gap-1"><EditIcon size="14px" />AI 扩写描述</span>
-        </TButton>
-      </div>
-
-      <div class="flex items-center justify-between rounded-xl bg-muted px-3 py-2">
-        <div>
-          <p class="text-sm font-medium">纯音乐</p>
-          <p class="text-[11px] text-subtle mt-0.5">开启后不生成人声与歌词</p>
-        </div>
-        <TSwitch v-model="instrumental" />
-      </div>
     </div>
-
     <div class="px-5 py-4 border-t border-line">
-      <TButton block size="large" theme="primary" :loading="isSubmitting" :disabled="isSubmitting" @click="submit">
+      <TButton block size="large" theme="primary" :loading="isSubmitting" :disabled="!canSubmit" @click="submit">
         {{ isSubmitting ? "生成中…" : "开始生成" }}
       </TButton>
-      <p class="text-[11px] text-subtle mt-2 text-center">简单创作 · 自动生成歌词与标题</p>
+      <p class="text-[11px] text-subtle mt-2 text-center">
+        {{ canSubmit || isSubmitting ? "简单创作 · 自动生成歌词与标题" : `请先输入歌词或歌曲描述（至少 ${MIN_PROMPT_LENGTH + 1} 字）` }}
+      </p>
     </div>
   </aside>
 </template>

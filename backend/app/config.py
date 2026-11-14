@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from pydantic import AliasChoices, Field
@@ -45,17 +46,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ACE_STEP_HOST", "MUSIC_STUDIO_HOST"),
     )
     port: int = Field(default=8788, validation_alias=AliasChoices("ACE_STEP_PORT", "MUSIC_STUDIO_PORT"))
-    # 前端 Vite dev 的两个常用端口；走 /api 代理时其实无需 CORS，
-    # 这里保留是为了直接跨域访问后端的场景。
-    cors_origins: list[str] = Field(
-        default_factory=lambda: [
-            "http://localhost:5175",
-            "http://127.0.0.1:5175",
-            "http://localhost:5177",
-            "http://127.0.0.1:5177",
-        ],
-        validation_alias="CORS_ORIGINS",
+    # 跨域：前端 dev 直连后端（例如 http://127.0.0.1:5177 -> http://localhost:8000）
+    # 是不同源，必须放行。默认允许**任意端口的本机回环来源**，省得每换一个
+    # 端口就改配置；生产用 CORS_ORIGINS 显式列出域名，逗号分隔或 JSON 数组均可。
+    # 把 MUSIC_STUDIO_CORS_ORIGIN_REGEX 设为空可关闭「回环全放行」。
+    cors_origins: str = Field(
+        default="",
+        validation_alias=AliasChoices("CORS_ORIGINS", "MUSIC_STUDIO_CORS_ORIGINS"),
     )
+    cors_origin_regex: str = Field(
+        default=r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$",
+        validation_alias="MUSIC_STUDIO_CORS_ORIGIN_REGEX",
+    )
+
+    @property
+    def cors_allow_origins(self) -> list[str]:
+        """解析 CORS_ORIGINS；空值表示只靠回环正则放行本机开发来源。"""
+        raw = self.cors_origins.strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        return [item.strip() for item in raw.split(",") if item.strip()]
 
     # 路径：相对路径一律以 PROJECT_ROOT 为基准解析（见 resolve）。
     data_dir: Path = Field(default=PROJECT_ROOT / "data", validation_alias="MUSIC_STUDIO_DATA_DIR")
@@ -79,6 +96,9 @@ class Settings(BaseSettings):
         default="https://api-inference.modelscope.cn", validation_alias="MUSIC_API_BASE_URL"
     )
     music_api_token: str | None = Field(default=None, validation_alias="MUSIC_API_TOKEN")
+    # 音乐模型 ID 的唯一来源：MusicProvider 提交、stage_steps 的 target_model
+    # 校验、SongService 给 model_variant 兜底都读这里；也由 /v1/health 暴露。
+    # prompts/music/system.md 的示例写死了同一个值，换模型前先确认模板兼容。
     music_model: str = Field(default="ACE-Step/acestep-v15-xl-sft", validation_alias="MUSIC_MODEL")
     music_poll_interval: int = 5       # 轮询远端任务状态的间隔（秒）
     music_timeout: int = 1800          # 单次等待生成的总上限（秒）

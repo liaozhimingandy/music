@@ -91,7 +91,7 @@ async def _run_job(song_id: str) -> None:
 
 
 async def submit_job(song_id: str) -> None:
-    """POST /api/generations 立即返回，由 asyncio 任务在后台跑五阶段。
+    """POST /v1/generations 立即返回，由 asyncio 任务在后台跑五阶段。
 
     ``_tasks`` 必须持有强引用：asyncio 只弱引用 task，不保存可能被 GC 提前
     回收；``discard`` 回调保证任务结束后集合不会无限增长。
@@ -116,7 +116,7 @@ async def get_song_service() -> SongService:
 
 
 async def get_llm_service() -> LLMService:
-    """惰性创建轻量 LLM 服务，供 /api/llm 三个按钮使用。"""
+    """惰性创建轻量 LLM 服务，供 /v1/llm 三个按钮使用。"""
     global _llm_service
     if _llm_service is None:
         from .llm_service import LLMService

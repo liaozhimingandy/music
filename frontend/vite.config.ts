@@ -2,13 +2,6 @@ import { fileURLToPath, URL } from "node:url";
 import { defineConfig, loadEnv } from "vite";
 import vue from "@vitejs/plugin-vue";
 
-const apiProxy = {
-  "/api": {
-    target: "http://127.0.0.1:8788",
-    changeOrigin: true,
-  },
-};
-
 /**
  * base 说明：
  * - 本地开发 / 自定义域名："/"
@@ -18,6 +11,14 @@ const apiProxy = {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
   const base = process.env.VITE_BASE_PATH || env.VITE_BASE_PATH || "/";
+
+  // 与后端 API_V1_PREFIX（/v1）保持一致；dev 与 preview 共用同一份代理规则。
+  // 后端端口可用 VITE_API_PROXY_TARGET 覆盖（例如自己用 8000 端口启动后端时）。
+  // 走同源代理（VITE_APP_API_BASE_URL=/v1）时完全不产生跨域请求，是最省心的方案；
+  // 直连完整地址时才依赖后端 CORS。
+  const proxyTarget =
+    process.env.VITE_API_PROXY_TARGET || env.VITE_API_PROXY_TARGET || "http://127.0.0.1:8788";
+  const apiProxy = { "/v1": { target: proxyTarget, changeOrigin: true } };
 
   return {
     base,

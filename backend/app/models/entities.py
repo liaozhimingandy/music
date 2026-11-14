@@ -44,7 +44,7 @@ class SongRecord:
     musical_key: str | None = None  # 出参映射为前端的 key
     time_signature: str | None = None
     # --- 音频与封面 ---
-    audio_url: str | None = None     # 相对 API 路径 /api/generations/{id}/audio
+    audio_url: str | None = None     # 相对 API 路径 /v1/generations/{id}/audio
     audio_path: str | None = None   # 服务器本地绝对路径，不返回给前端
     cover_color: str | None = None
     cover_icon: str | None = None

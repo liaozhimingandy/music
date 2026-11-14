@@ -24,7 +24,7 @@ import {
   statusText,
   statusTheme,
   taskTypeText,
-  variantText,
+  variantLabel,
 } from "@/common/utils";
 
 defineProps<{
@@ -96,7 +96,7 @@ function remove() {
       <div class="rounded-xl bg-muted p-4 grid grid-cols-2 gap-3">
         <div class="flex flex-col gap-0.5">
           <span class="text-[11px] text-subtle">模型</span>
-          <span class="text-sm font-medium">{{ variantText[song.model_variant] }}</span>
+          <span class="text-sm font-medium">{{ variantLabel(song.model_variant) }}</span>
         </div>
         <div class="flex flex-col gap-0.5">
           <span class="text-[11px] text-subtle">创建时间</span>

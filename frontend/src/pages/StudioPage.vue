@@ -6,20 +6,20 @@
  * 把用户操作交回这里处理，不自己发请求。
  *
  * 数据流：services/api.ts（axios + 离线降级）-> history / pending 两个
- * 响应式数组 -> 三栏组件；每 POLL_INTERVAL 轮询 /api/history 刷新生成状态。
+ * 响应式数组 -> 三栏组件；每 POLL_INTERVAL 轮询 /v1/history 刷新生成状态。
  *
  * 播放：页面内唯一的 <audio ref="audioRef"> 由本组件持有，子组件只发
  * playPause / seek / prev / next / volume 等事件，避免多处同时操作 audio。
  * 播放器显隐与音量持久化在 localStorage（见两个 STORAGE_KEY）。
  *
- * 关键函数：handleCreate（四步简单创作流程）、switchTrack（切歌）、
+ * 关键函数：handleCreate（提交生成任务）、switchTrack（切歌）、
  * handleDelete / handleDownload / showLibrary。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
 import { MusicIcon, ViewListIcon } from "tdesign-icons-vue-next";
 
-import { createGeneration, deleteGeneration, detectBackend, listHistory, runLLMTask } from "@/services/api";
+import { createGeneration, deleteGeneration, detectBackend, listHistory, resolveAudioUrl, runLLMTask } from "@/services/api";
 import CreatePanel from "@/components/CreatePanel.vue";
 import LibraryPanel from "@/components/LibraryPanel.vue";
 import SongDetailPanel from "@/components/SongDetailPanel.vue";
@@ -27,7 +27,6 @@ import PlaybackBar from "@/components/PlaybackBar.vue";
 import MiniPlayer from "@/components/MiniPlayer.vue";
 import type { CreateFormValues, GenerationResponse, PendingGeneration } from "@/interface";
 import { cleanTitle, truncateText } from "@/common/utils";
-import { DEFAULT_SEED_PROMPT, LYRICS_INSTRUCTION, STAGE_LABELS } from "@/common/constants";
 import { config } from "@/common/config";
 
 type BackendState = "checking" | "online" | "demo";
@@ -81,7 +80,10 @@ const backendLabel = computed(() =>
       : "连接中…",
 );
 const selectedSong = computed(() => history.value.find((item) => item.id === selectedId.value));
-const selectedAudioUrl = computed(() => selectedSong.value?.audio_url || null);
+// 后端返回 /v1/... 相对路径；直连后端时 resolveAudioUrl 会补上域名
+const selectedAudioUrl = computed(() =>
+  selectedSong.value?.audio_url ? resolveAudioUrl(selectedSong.value.audio_url) : null,
+);
 const currentIndex = computed(() => history.value.findIndex((item) => item.id === selectedId.value));
 const hasPrev = computed(() => currentIndex.value > 0);
 const hasNext = computed(() => currentIndex.value >= 0 && currentIndex.value < history.value.length - 1);
@@ -237,7 +239,7 @@ function showLibrary() {
 
 async function handleDownload(song: GenerationResponse) {
   if (!song.audio_url) return;
-  const response = await fetch(song.audio_url);
+  const response = await fetch(resolveAudioUrl(song.audio_url));
   if (!response.ok) return;
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
@@ -286,91 +288,65 @@ function serverErrorMessage(error: unknown): string | null {
 }
 
 /**
- * 「简单创作」四步流程：AI 扩写描述 -> 写词（纯音乐跳过）-> 起标题
- * -> POST /api/generations 提交后台任务。
+ * 「开始生成」：把用户原始描述直接提交给 POST /v1/generations，由后端
+ * WorkflowService 统一编排五阶段（策划 → 写词 → 润色 → 制作方案 → 音频）。
  *
- * 先插入一条 pending 占位卡片并逐步推进 stageIndex，给用户即时反馈；
- * 提交成功后移除占位、选中真实记录并刷新列表。任一步失败只把该占位
- * 卡片标记为错误，不影响作品库里已有的数据。
+ * 历史事件：早期版本会在这里先串行调 3 次 POST /v1/llm（扩写描述、写词、
+ * 起标题）再提交生成。这三次与后端流程重复——后端润色阶段还会覆盖
+ * title / lyrics，且把扩写后的文本当成原始输入再分析一遍；同时白耗 3 次
+ * LLM 配额（容易撞 20 次/60s 限流）。现已移除，/v1/llm 只保留给「AI 扩写
+ * 描述」这类用户主动点击的辅助功能（见 handleExpand）。
+ *
+ * 提交在途期间插入一条 pending 占位卡片；成功后移除、选中真实记录并刷新，
+ * 之后进度完全由后端 status / current_stage 驱动。失败只把占位卡标为错误。
  */
 async function handleCreate(values: CreateFormValues) {
-  const tempId = `temp-${Date.now()}`;
-  const stageLabels: string[] = values.instrumental
-    ? [...STAGE_LABELS.instrumental]
-    : [...STAGE_LABELS.vocal];
+  const prompt = values.prompt.trim();
+  // 左栏按钮已禁用空输入，这里再挡一次程序化调用（例如绕过 UI 的事件触发）
+  if (!prompt) {
+    MessagePlugin.warning("请先输入歌词或歌曲描述");
+    return;
+  }
 
+  const tempId = `temp-${Date.now()}`;
   pending.value = [
     ...pending.value,
-    { tempId, title: truncateText(values.prompt, 24), prompt: values.prompt, stageLabels, stageIndex: 0 },
+    {
+      tempId,
+      title: truncateText(prompt, 24),
+      prompt,
+      stageLabels: ["提交生成任务"],
+      stageIndex: 0,
+    },
   ];
   flowRunning.value = true;
 
-  const patch = (data: Partial<PendingGeneration>) => {
-    pending.value = pending.value.map((item) => (item.tempId === tempId ? { ...item, ...data } : item));
-  };
-  const advance = () => {
-    pending.value = pending.value.map((item) =>
-      item.tempId === tempId
-        ? { ...item, stageIndex: Math.min(item.stageLabels.length - 1, item.stageIndex + 1) }
-        : item,
-    );
-  };
-
   try {
-    const seed = values.prompt.trim() || DEFAULT_SEED_PROMPT;
-    const expanded = await runLLMTask({
-      task: "prompt",
-      seed_prompt: seed,
-      instrumental: values.instrumental,
-      style_tags: [],
-    });
-    const prompt = expanded.output;
-    patch({ prompt });
-    advance();
-
-    let lyrics = "[Instrumental]";
-    if (!values.instrumental) {
-      const result = await runLLMTask({
-        task: "lyrics",
-        seed_prompt: `${prompt}\n${LYRICS_INSTRUCTION}`,
-        instrumental: false,
-        style_tags: [],
-      });
-      lyrics = result.output;
-      advance();
-    }
-
-    const titled = await runLLMTask({
-      task: "title",
-      seed_prompt: `为以下歌曲概念起一个简短的中文标题（不超过 6 个字）：${prompt}`,
-      instrumental: values.instrumental,
-      style_tags: [],
-    });
-    const title = cleanTitle(titled.output);
-    patch({ title: truncateText(title, 24) });
-    advance();
-
+    // model_variant / title / lyrics 都不传：模型由后端 MUSIC_MODEL 决定，
+    // 标题与歌词由后端润色阶段产出，避免前端硬编码与后端配置不一致。
     const created = await createGeneration({
-      title,
       task_type: "text2music",
       mode: "simple",
-      model_variant: "turbo",
-      inputs: { prompt, lyrics, instrumental: values.instrumental },
+      inputs: { prompt, instrumental: values.instrumental },
     });
-    advance();
     pending.value = pending.value.filter((item) => item.tempId !== tempId);
     selectedId.value = created.id;
     await refresh();
     MessagePlugin.success("生成任务已提交");
   } catch (error) {
     console.error("生成流程失败", error);
-    patch({ error: serverErrorMessage(error) ?? "生成失败，请检查后端服务或模型配置" });
+    const reason = serverErrorMessage(error) ?? "生成失败，请检查后端服务或模型配置";
+    pending.value = pending.value.map((item) => (item.tempId === tempId ? { ...item, error: reason } : item));
   } finally {
     flowRunning.value = false;
   }
 }
 
-/** 左栏「AI 扩写描述」 */
+/**
+ * 「AI 扩写描述」辅助功能：用户主动点击时才调用 POST /v1/llm。
+ * 左栏模板当前未挂载该按钮（见 CreatePanel.vue），函数保留供恢复时使用，
+ * 不参与「开始生成」的主链路。
+ */
 async function handleExpand(prompt: string, instrumental: boolean): Promise<string> {
   const result = await runLLMTask({
     task: "prompt",
@@ -392,7 +368,6 @@ async function handleExpand(prompt: string, instrumental: boolean): Promise<stri
         </div>
         <div>
           <h1 class="text-base font-semibold leading-5 text-white">Music Studio · 音乐创作台</h1>
-          <p class="text-xs text-white/70 mt-0.5">本地优先的 AI 音乐创作工作台 · 数据留在本机</p>
         </div>
         <span class="netease-status ml-1">{{ backendLabel }}</span>
       </div>

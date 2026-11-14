@@ -184,10 +184,11 @@ export function demoCreate(payload: GenerationCreate): GenerationResponse {
     title: payload.title || "未命名作品",
     task_type: payload.task_type,
     mode: payload.mode,
-    model_variant: payload.model_variant,
+    // 演示模式没有后端配置可读，用历史标记占位；真实模式由后端 MUSIC_MODEL 回填
+    model_variant: payload.model_variant || "turbo",
     status: "queued",
     prompt: payload.inputs.prompt,
-    lyrics: payload.inputs.lyrics,
+    lyrics: payload.inputs.lyrics || "",
     instrumental: payload.inputs.instrumental,
     duration_seconds: null,
     bpm: null,

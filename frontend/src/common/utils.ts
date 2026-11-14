@@ -47,16 +47,31 @@ export const taskTypeText: Record<string, string> = {
 };
 
 export const variantText: Record<string, string> = {
+  "ACE-Step/acestep-v15-xl-sft": "ACE-Step 1.5 XL",
   base: "基础版",
   turbo: "极速版",
   shift: "变奏版",
 };
 
 export const variantShortText: Record<string, string> = {
+  "ACE-Step/acestep-v15-xl-sft": "ACE-STEP",
   base: "BASE",
   turbo: "TURBO",
   shift: "SHIFT",
 };
+
+/** 已知模型给中文名；换 MUSIC_MODEL 或遇到历史值时展示原始 ID，不留空白 */
+export function variantLabel(value?: string | null): string {
+  if (!value) return "未指定模型";
+  return variantText[value] || value;
+}
+
+/** 卡片上的短标签；未知模型取 ID 最后一段并截短，不写死 "TURBO" */
+export function variantShortLabel(value?: string | null): string {
+  if (!value) return "MODEL";
+  if (variantShortText[value]) return variantShortText[value];
+  return (value.split("/").pop() || value).slice(0, 12).toUpperCase();
+}
 
 export function formatClock(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";

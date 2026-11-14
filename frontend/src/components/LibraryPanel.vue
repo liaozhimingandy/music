@@ -22,7 +22,7 @@ import {
   statusTheme,
   taskTypeText,
   truncateText,
-  variantShortText,
+  variantShortLabel,
 } from "@/common/utils";
 
 defineProps<{
@@ -147,7 +147,7 @@ function deleteItem(id: string) {
                   <p class="text-sm font-semibold truncate">{{ truncateText(item.title || item.prompt, 32) }}</p>
                   <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
                     <TTag size="small" variant="light" theme="primary">
-                      {{ variantShortText[item.model_variant] || "TURBO" }}
+                      {{ variantShortLabel(item.model_variant) }}
                     </TTag>
                     <TTag size="small" variant="light">{{ taskTypeText[item.task_type] || "文生音乐" }}</TTag>
                     <TTag size="small" variant="light" :theme="statusTheme(item.status)">
