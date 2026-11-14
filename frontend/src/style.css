@@ -1,0 +1,186 @@
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  color: #1d2129;
+  background-color: #f5f6f8;
+
+  /* 网易云音乐风格主色：经典红 #ec4141 */
+  --td-brand-color: #ec4141;
+  --td-brand-color-hover: #f05b5b;
+  --td-brand-color-active: #c20c0c;
+  --td-brand-color-focus: #fde2e2;
+  --td-brand-color-1: #fff5f5;
+  --td-brand-color-2: #ffe9e9;
+  --td-brand-color-3: #ffd0d0;
+  --td-brand-color-4: #ffa8a8;
+  --td-brand-color-5: #f77b7b;
+  --td-brand-color-6: #ec4141;
+  --td-brand-color-7: #d62f2f;
+  --td-brand-color-8: #c20c0c;
+  --td-brand-color-9: #9e0a0a;
+  --td-brand-color-10: #7a0808;
+  --td-radius-default: 6px;
+  --td-radius-medium: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+.ace-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.ace-scroll::-webkit-scrollbar-thumb {
+  background: #d8dce6;
+  border-radius: 999px;
+}
+.ace-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ace-cover {
+  background-image: linear-gradient(135deg, var(--cover-a, #f77b7b), var(--cover-b, #c20c0c));
+}
+
+/* 网易云式黑胶唱片：外圈纹理 + 中心封面，播放时旋转 */
+.netease-disc {
+  position: relative;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, transparent 0 30%, rgba(255, 255, 255, 0.06) 30% 31%, transparent 31% 43%, rgba(255, 255, 255, 0.05) 43% 44%, transparent 44%),
+    repeating-radial-gradient(circle at center, #2b2b2f 0 3px, #1b1b1f 3px 5px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  flex-shrink: 0;
+  animation: disc-spin 18s linear infinite;
+  animation-play-state: paused;
+}
+.netease-disc.is-playing {
+  animation-play-state: running;
+}
+.netease-disc::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+}
+.netease-disc-center {
+  position: absolute;
+  inset: 28%;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+}
+.netease-disc-hole {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: #f5f6f8;
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
+  z-index: 2;
+}
+@keyframes disc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .netease-disc {
+    animation: none;
+  }
+}
+
+/* 细线进度条 / 音量条 */
+.netease-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 14px;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+}
+.netease-range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(to right, #ec4141 0 var(--fill, 0%), #dcdfe6 var(--fill, 0%) 100%);
+}
+.netease-range::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(to right, #ec4141 0 var(--fill, 0%), #dcdfe6 var(--fill, 0%) 100%);
+}
+.netease-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: #ec4141;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.netease-range::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ec4141;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  opacity: 0;
+}
+.netease-range:hover::-webkit-slider-thumb,
+.netease-range:focus-visible::-webkit-slider-thumb {
+  opacity: 1;
+}
+.netease-range:hover::-moz-range-thumb,
+.netease-range:focus-visible::-moz-range-thumb {
+  opacity: 1;
+}
+.netease-range:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* 顶栏红色底上的状态标签 */
+.netease-status {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  white-space: nowrap;
+}

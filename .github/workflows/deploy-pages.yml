@@ -1,0 +1,110 @@
+name: Deploy Frontend to GitHub Pages
+
+# =============================================================================
+# 把 frontend/ 构建成静态站点并发布到 GitHub Pages。
+#
+# 一次性设置：仓库 Settings → Pages → Build and deployment → Source 选 "GitHub Actions"。
+# 之后每次 push 到 main 且前端文件变化，或手动 workflow_dispatch，即自动构建部署。
+#
+# 说明：
+# - GitHub Pages 是纯静态托管，没有 FastAPI 后端，页面会自动进入演示模式；
+#   如需连真实后端，在 .env.production 里把 VITE_APP_API_BASE_URL 配成完整地址（需后端开启 CORS）。
+# - 项目页 URL 形如 https://<owner>.github.io/<repo>/，因此 Vite base 必须是 /<repo>/；
+#   这里用 CI 注入的 VITE_BASE_PATH=/${{ github.event.repository.name }}/，fork 后无需改配置。
+# - 无需任何 token / secret，使用官方 Pages Actions 的 OIDC 权限即可。
+# =============================================================================
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: deploy-pages-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  build:
+    name: 类型检查与构建
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖（严格按锁文件）
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查与构建
+        working-directory: frontend
+        env:
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          VITE_APP_BUILD: ${{ github.sha }}
+        run: npm run build
+
+      - name: 校验构建产物
+        working-directory: frontend
+        env:
+          PAGES_BASE: /${{ github.event.repository.name }}/
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          asset=$(grep -oE 'assets/[A-Za-z0-9._-]+\.js' dist/index.html | head -1)
+          test -n "$asset" || { echo "::error::index.html 没有引用任何 js 资源"; exit 1; }
+          test -f "dist/${asset}" || { echo "::error::index.html 引用的 ${asset} 不存在"; exit 1; }
+          grep -q "${PAGES_BASE}assets/" dist/index.html || {
+            echo "::error::Vite base 未生效，资源路径不是 ${PAGES_BASE}assets/"; exit 1;
+          }
+          # SPA 深链兜底 + 关闭 Jekyll（避免 _ 开头资源被忽略）
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
+          echo "入口资源: ${asset}"
+          echo "产物文件数: $(find dist -type f | wc -l)"
+
+      - name: 配置 GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: 上传 Pages 产物
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/dist
+
+      - name: 上传构建留档
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: frontend/dist
+          retention-days: 7
+
+  deploy:
+    name: 部署到 GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 发布
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,62 @@
+# Python
+backend/.venv/
+*.egg-info/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# TypeScript / Vite 构建产物（tsc 只做 noEmit 类型检查，不生成这些文件）
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# Local app data/state (repo root only; frontend/src/data/ is source code)
+/data/
+backend/data/
+backend/app/data/
+*.db
+*.sqlite
+*.sqlite3
+runtime_config.json
+
+# Generated media
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.aac
+*.ogg
+*.png
+*.jpg
+*.jpeg
+*.webp
+!docs/images/*.png
+!docs/images/*.jpg
+!docs/images/*.jpeg
+!docs/images/*.webp
+
+# Env/secrets（.env.development / .env.production 是可提交的模板配置）
+.env
+*.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs
+*.log
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Optional local model drop area (repo root only; backend/app/models/ is source code)
+/models/
