@@ -32,7 +32,7 @@ def ca_cert_candidates(raw: str | None) -> list[Path]:
 
     为什么要这么麻烦：``.env`` 里写 ``.\\root.crt`` 在 Windows 控制台看起来
     没问题，但它的解析结果**取决于进程的 CWD**——用 ``uvicorn app.main:app``
-    从仓库根启动时，``.\\root.crt`` 指向仓库根，而证书其实在 ``backend/app/``
+    从仓库根启动时，``.\\root.crt`` 指向仓库根，而证书其实在 ``backend/``
     下；跑到 Linux 容器里反斜杠更会变成文件名字符的一部分，于是 httpx 报
     「找不到证书」。所以这里统一做三件事：
 

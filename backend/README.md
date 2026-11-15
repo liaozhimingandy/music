@@ -193,9 +193,11 @@ aiosqlite 清理产物等细节。
   整体使用的模型，可用来判断某首歌到底是哪个模型产出的。
 - **`LLM_CA_CERT` 提示找不到证书**：相对路径不再按启动目录解析，而是依次尝试
   `backend/app` → `backend` → 仓库根 → 进程 CWD，所以把 `root.crt` 放在
-  `backend/app/` 下、`.env` 里写 `root.crt` 或 `.\root.crt` 都能命中（反斜杠会
-  自动转成正斜杠，Linux 同样有效）。配置了却解析不到时，启动日志会打印
+  `backend/` 下（仓库里的位置）、`.env` 里写 `root.crt` 或 `.\root.crt` 都能命中
+  （反斜杠会自动转成正斜杠，Linux 同样有效）。配置了却解析不到时，启动日志会打印
   `LLM 请求启用自定义 CA 证书`（成功）或 `指向的证书不存在（已尝试：…）`（失败）。
+  这份证书只用于**后端出方向**访问 `llm.alsoapp.com`；浏览器访问本服务 HTTPS
+  的信任问题见 [docs/certificate.md](../docs/certificate.md)。
 - **前端提示跨域**：先看响应状态码。500 也会被浏览器报成 CORS，用
   `curl -i http://localhost:8788/v1/history` 确认后端本身是否正常。
 

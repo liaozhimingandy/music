@@ -224,7 +224,7 @@ backend/app/
 │   └── uv.lock         # 锁定的依赖版本，镜像构建用 --frozen 保证一致
 ├── frontend/           # 中文单页前端（Vue 3），构建产物由 GitHub Pages 静态托管
 ├── docker-compose.yml  # 本地/源码构建版编排
-├── docs/               # 安装指南、接口清单、Docker 部署、截图
+├── docs/               # 安装指南、接口清单、Docker 部署、证书与 HTTPS 信任、截图
 ├── scripts/            # 各平台安装与启动脚本
 ├── .github/workflows/  # Pages 部署 + 镜像发布（Docker Hub / 阿里云 ACR）
 ├── data/               # 运行时数据（SQLite、音频、封面，已忽略）
@@ -276,5 +276,6 @@ GitHub Pages 的 base 默认取 `.env.production` 的 `/`（自定义域名场�
 
 - [安装指南](./docs/installation.md)
 - [Docker 部署](./docs/deployment.md) — 镜像仓库配置、云服务器部署、HTTPS、升级回滚、备份与排障
+- [证书与 HTTPS 信任](./docs/certificate.md) — 两个 TLS 方向的区别、其他设备如何导入根证书、前端为何不能嵌入根证书
 - [后端接口清单](./docs/api.md) — 8 个接口、幂等去重与限流规则、UUIDv7、五阶段流程与 SQLite 表结构
 - [后端说明](./backend/README.md) — 分层、运行、离线演示与冒烟测试

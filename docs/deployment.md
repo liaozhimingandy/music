@@ -368,7 +368,7 @@ docker compose start backend
 | `docker pull` 卡住或超时 | 国内机器改用阿里云 ACR 地址；或给 daemon 配镜像加速器 |
 | 生成任务一直 `queued` | backend 容器重启过？看日志里「恢复队列」是否有记录；也可能是 `MUSIC_STUDIO_MAX_ACTIVE_JOBS` 满了（默认 4） |
 | 用户反馈「今日生成额度已用完」 | 这是成本闸门生效：`MUSIC_STUDIO_DAILY_LIMIT`（默认 50 首/天）已用满，日志里有「每日生成配额已用完：50/50」。临时放开调大该值并 `docker compose up -d`，或直接设 0 关闭配额（不建议公网这么干）。当前用量可看 `/v1/health` 的 `daily_used` / `daily_remaining` |
-| 任务全部失败且日志有 `证书` / SSL 报错 | 企业代理自签证书：把 `root.crt` 放回 `backend/app/`（镜像已内置）并在 `.env` 设 `LLM_CA_CERT=root.crt`，启动日志会打印实际使用的证书路径 |
+| 任务全部失败且日志有 `证书` / SSL 报错 | 企业代理自签证书：把 `root.crt` 放回 `backend/`（镜像已内置）并在 `.env` 设 `LLM_CA_CERT=root.crt`，启动日志会打印实际使用的证书路径。注意这只影响后端访问 LLM 网关，浏览器侧的 HTTPS 信任见 [certificate.md](certificate.md) |
 | 想查某次生成的详细过程 | 应用日志在数据卷里：`docker exec $(docker compose ps -q backend) tail -n 100 /app/data/logs/$(date +%F).log`。默认 INFO 就含「每个阶段用了哪个模型 / 多少 token / 耗时」；排查疑难再在 `.env` 里设 `DEBUG=true` 重启（会记录 LLM 请求参数与返回内容摘要，注意日志量增大，别长期开） |
 | 换了 LLM 模型但数据库里 `song_stages.model` 没变 | 断点续跑的阶段会跳过执行复用旧产物，日志里是「复用已落盘产物…跳过执行（模型沿用上次记录的 X）」。想用新模型重跑把 `MUSIC_STUDIO_RESUME=false` 写进 `.env` 再 `docker compose up -d` |
 | 磁盘涨得快 | `docker system df` 看镜像与日志；本仓库已给容器配了 json-file 轮转（10MB×3），应用日志另有 7 天保留（`MUSIC_STUDIO_LOG_RETENTION_DAYS`）。旧作品需要定期清理 `outputs/` |

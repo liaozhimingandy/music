@@ -64,8 +64,15 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # 只拷 app 包（tests / .venv / .env 由 .dockerignore 挡在构建上下文外）。
-# prompts/ 与 root.crt 都在 app 目录里，跟着一起进镜像（提示词是运行必需）。
+# prompts/ 在 app 目录里，跟着一起进镜像（提示词是运行必需）。
 COPY app ./app
+
+# 企业 CA 根证书（AlsoApp DigiCert Root CA）：后端出方向访问 llm.alsoapp.com
+# 时用它验证网关的自签证书（LLM_CA_CERT=root.crt）。
+# 放在 backend/ 而非 app/ 里 —— 它是后端的运行时配置，不属于 app 包。
+# 容器内落到 /app/root.crt，正好命中 config.ca_cert_candidates 的
+# BACKEND_DIR 候选（app 目录 → backend 目录 → 仓库根 → 进程 CWD）。
+COPY root.crt ./root.crt
 
 # 非 root 运行：先建用户，再把数据目录给它（命名卷首次创建时会继承该属主）。
 # 若改用 bind mount（./data:/app/data），宿主机目录必须先

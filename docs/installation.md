@@ -109,4 +109,4 @@ uv run --project backend python backend/tests/smoke_test.py
 | 端口冲突 | 改 `backend/.env` 的 `PORT`，或前端开发服务器加 `--port 5177` |
 | Pages 线上页面无法生成 | 纯静态托管没有后端，需自建后端并把 `VITE_APP_API_BASE_URL` 指向后端地址 |
 | Pages 打开是白屏 / 提示找不到 js | 资源 base 与部署路径不一致。绑定自定义域名（如 `music.openaim.cn`）时站点在根路径，`VITE_BASE_PATH` 必须是 `/`（工作流默认沿用 `.env.production`，不再强制注入）；只有项目页 `/<owner>.github.io>/<repo>/` 才需要在仓库变量里设 `PAGES_BASE_PATH=/<repo>/` |
-| 启动日志提示「LLM_CA_CERT 指向的证书不存在」 | 证书路径按 `backend/app` → `backend` → 仓库根 → 进程 CWD 依次尝试；把 `root.crt` 放到 `backend/app/` 下、`.env` 里写 `root.crt`（或 `.\root.crt`）即可，反斜杠会自动转正斜杠 |
+| 启动日志提示「LLM_CA_CERT 指向的证书不存在」 | 证书路径按 `backend/app` → `backend` → 仓库根 → 进程 CWD 依次尝试；把 `root.crt` 放到 `backend/` 下、`.env` 里写 `root.crt`（或 `.\root.crt`）即可，反斜杠会自动转正斜杠。该证书只管后端访问 LLM 网关，浏览器 HTTPS 信任问题见 [certificate.md](certificate.md) |
