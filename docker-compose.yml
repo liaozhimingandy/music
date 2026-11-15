@@ -1,13 +1,14 @@
 # 源码构建版编排：本地开发 / 直接在有代码的机器上跑后端。
 #
-#   cp deploy/.env.example .env      # 填 LLM_API_KEY、MUSIC_API_TOKEN
+#   cp backend/.env.example .env      # 填 LLM_API_KEY、MUSIC_API_TOKEN
 #   docker compose up -d --build
-#   后端监听 8788；前端另走 GitHub Pages / Cloudflare，不在本编排内。
+#   后端容器内监听 8000，映射到宿主机 8788；前端另走 GitHub Pages / Cloudflare，
+#   不在本编排内。
 #
 # 没配密钥想先看界面：MUSIC_STUDIO_MOCK=true docker compose up -d --build
 # （离线演示模式，LLM 与音乐生成都走桩，不联网、不花钱）
 #
-# 生产环境请用 deploy/docker-compose.yml（拉镜像，不在服务器上编译）。
+# 生产环境请用 backend/docker-compose.yml（拉镜像，不在服务器上编译）。
 
 name: music-studio
 
@@ -36,17 +37,25 @@ services:
       # 容器内固定路径，与后端镜像里 chown 过的 /app/data 保持一致；
       # 宿主机只关心命名卷，不关心它在哪个物理目录。
       MUSIC_STUDIO_DATA_DIR: /app/data
-      MUSIC_STUDIO_PORT: "8788"
       # 反代（Cloudflare / 宿主 Nginx / 云 LB）会写 X-Forwarded-For，开启后
       # 限流 / 单客户端并发按真实 IP 统计。
       MUSIC_STUDIO_TRUST_PROXY: "true"
       MUSIC_STUDIO_MOCK: ${MUSIC_STUDIO_MOCK:-false}
     ports:
-      # 本地开发直接访问；上云时改成 127.0.0.1:8788:8788 再经反代暴露。
-      - "${BACKEND_PORT:-8788}:8788"
+      # 宿主机端口 -> 容器端口（容器内固定 8000）。
+      # 上云时改成 127.0.0.1:8788:8000 再经反代暴露。
+      - "${BACKEND_PORT:-8788}:8000"
     volumes:
       # SQLite 库 + outputs 音频 + 阶段 JSON 全在这里，删卷 = 删全部作品。
       - music-data:/app/data
+    # 健康检查放在编排里而不是 Dockerfile：探针参数属于部署策略，
+    # 同一个镜像在不同环境可以有不同探针参数。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/v1/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     logging: *default-logging
 
 volumes:

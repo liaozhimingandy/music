@@ -250,11 +250,13 @@ jobs:
           docker pull "${image}"
           docker rm -f music-smoke >/dev/null 2>&1 || true
           # mock 模式：不联网、不需要密钥，但建表/健康检查/静态资源路径全走真实代码。
-          docker run -d --name music-smoke -p 8788:8788 \
+          # 容器内监听端口固定 8000（与 backend/Dockerfile 的 CMD 一致），
+          # 这里必须映射并探测同一个端口，否则冒烟测试会一直等不到就绪。
+          docker run -d --name music-smoke -p 8000:8000 \
             -e MUSIC_STUDIO_MOCK=true "${image}"
 
           for i in $(seq 1 30); do
-            if body="$(curl -fsS http://127.0.0.1:8788/v1/health 2>/dev/null)"; then
+            if body="$(curl -fsS http://127.0.0.1:8000/v1/health 2>/dev/null)"; then
               echo "健康检查通过：${body}"
               echo "--- 容器日志 ---"
               docker logs music-smoke

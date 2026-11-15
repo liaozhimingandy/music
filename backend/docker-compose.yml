@@ -9,15 +9,15 @@
 #
 # 接入已有 Traefik（关键两步）：
 #   1) 本服务通过 labels 暴露给 Traefik，必须和 Traefik 在同一 Docker 网络；
-#   2) 本文件复用名为 proxy 的已有网络（external），如果你的 Traefik 网络名不同，
+#   2) 本文件复用名为 traefik 的网络，如果你的 Traefik 网络名不同，
 #      用 TRAEFIK_NETWORK 覆盖，例如：TRAEFIK_NETWORK=traefik_public docker compose up -d --build
 #
-# 路由标签（核心）：
-#   traefik.enable=true                让 Traefik 接管本服务
-#   traefik.http.routers.music-studio.rule=Host(...)   按域名匹配
-#   traefik.http.services.music-studio.loadbalancer.server.port=8788
-#                                        后端容器内监听端口（与上面的 PORT 一致）
-# 健康检查探 /v1/health，不健康就不转发流量。
+# 端口（改端口要同步改这三处，漏一处就 502 / 探针失败）：
+#   容器内监听 8000   —— 由 backend/Dockerfile 的 CMD 固定（FastAPI 官方默认）
+#   宿主机映射 18788  —— 下面的 ports；宿主机侧不要再用 8000，本地前端 dev/preview 已占用
+#   Traefik 转发 8000 —— 下面 labels 的 server.port，必须是**容器内**端口
+#
+# 健康检查：探 /v1/health，不健康就不转发流量。
 
 name: music-studio-backend
 
@@ -35,19 +35,14 @@ services:
     restart: unless-stopped
     # 读取同级 .env（默认当前目录 ./.env；位置不同用 ENV_FILE 覆盖）。
     # required:false 保证缺 .env 也能起（走 mock / 缺密钥状态，便于先验证镜像）。
-    # 宿主机端口 -> 容器端口。
-    # 宿主机侧不要再用 8000：本地前端 dev/preview 已占用 8000（实测 127.0.0.1:8000
-    # 返回的是 Vite 页面），同端口会让 Docker 与前端互相抢占，表现为「时好时坏」。
+    # 宿主机端口 -> 容器端口（容器内固定 8000）。
     ports:
-      - 18788:8788
+      - 18788:8000
     env_file:
       - .env
     environment:
-      # 以下为容器内固定路径 / 端口 / 代理配置，不来自 .env：
+      # 以下为容器内固定路径 / 代理配置，不来自 .env：
       MUSIC_STUDIO_DATA_DIR: /app/data
-      # 容器内监听端口：与下面 Traefik 的 server.port 标签必须一致。
-      # 改端口要同时改这两处（否则 Traefik 转发到没人监听的端口，502）。
-      PORT: "8788"
       MUSIC_STUDIO_TRUST_PROXY: "true"   # 经 Traefik 反代，开启以按真实 IP 限流
       MUSIC_STUDIO_MOCK: ${MUSIC_STUDIO_MOCK:-false}
     volumes:
@@ -55,15 +50,25 @@ services:
       - music-data:/app/data
     networks:
       - proxy
+    # 健康检查放在编排里而不是 Dockerfile：探针路径 / 超时 / 间隔属于部署策略，
+    # 同一个镜像在不同环境（本地、预发、生产）可以有不同探针参数。
+    # /v1/health 不挂限流、不碰 LLM，能真实反映「进程活着且库能打开」。
+    # start-period 给 20 秒，首次建表 + 补列留足时间。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/v1/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.fastapi-tools.rule=Host(`apit-tools.alsoapp.com`)"
       - "traefik.http.routers.fastapi-tools.entrypoints=websecure"
       - "traefik.http.routers.fastapi-tools.tls=true"
       - "traefik.http.routers.fastapi-tools.tls.certresolver=letsencrypt"
-      # 必须是**容器内**实际监听的端口（= 上面 environment 里的 PORT，即 8788），
-      # 不是宿主机映射出去的端口。写错会导致 Traefik 转发到无人监听的端口 → 502。
-      - "traefik.http.services.fastapi-tools.loadbalancer.server.port=8788"
+      # 必须是**容器内**实际监听的端口（即 8000），不是宿主机映射出去的端口。
+      # 写错会导致 Traefik 转发到无人监听的端口 → 502。
+      - "traefik.http.services.fastapi-tools.loadbalancer.server.port=8000"
       # 告诉 Traefik 用哪个 Docker 网络访问本容器，要与下面 networks 里的实际网络名一致。
       - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik}"
     logging: *default-logging
@@ -71,7 +76,6 @@ services:
 volumes:
   music-data:
 
-# 复用已存在的 proxy 网络（Traefik 所在网络），不在本文件创建新网络。
 # 复用 Traefik 所在网络。显式给 name（不加 compose 项目名前缀），网络名稳定可预期，
 # 并与上面 traefik.docker.network 标签保持一致。
 #   生产：该网络通常由 Traefik 先创建，此时应改为 external: true 直接复用，

@@ -91,9 +91,11 @@ class Settings(BaseSettings):
 
     # 网络：HOST / PORT 为主变量名（.env 里直接写 HOST= / PORT= 即可生效），
     # 兼容旧启动脚本的 ACE_STEP_HOST/PORT 与 MUSIC_STUDIO_HOST/PORT 别名。
-    # 绑定地址由 run.py（统一启动入口）读取本字段后启动 uvicorn；
-    # 以前 Dockerfile / 启动脚本里写死了 --host 0.0.0.0 --port 8788，
-    # 改 .env 不生效，现在统一走 settings。
+    # 这两个值用于**本机原生启动**：scripts/start.sh|start.bat 读 .env 后
+    # 传给 uvicorn --host/--port，所以改 .env 会真正改变本地监听地址。
+    # 容器内则固定监听 8000（backend/Dockerfile 的 CMD 决定），与这两个变量
+    # 无关；改容器端口要同步改 compose 的端口映射、healthcheck 与
+    # Traefik server.port 三处。
     host: str = Field(
         default="0.0.0.0",
         validation_alias=AliasChoices("HOST", "MUSIC_STUDIO_HOST", "ACE_STEP_HOST"),
