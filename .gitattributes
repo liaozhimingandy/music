@@ -1,0 +1,25 @@
+# 换行符规则。
+#
+# 为什么需要：Windows 默认 core.autocrlf=true，checkout 出来的文件是 CRLF。
+# Dockerfile 的多行指令靠行尾反斜杠续行，`\` 后面跟着 `\r` 时 BuildKit 会把
+# `\r` 当成参数字符（常见表现：`unknown instruction: APT-GET` 或 apt 参数错误），
+# 镜像构建直接失败。nginx / compose 对 CRLF 相对宽容，但保持 LF 更省心。
+#
+# 只声明本轮新增的容器相关文件，**不要**写成 `* text=auto eol=lf`：
+# 那会把仓库里已按 CRLF 存储的历史文件全部重写，产生一个纯换行的巨型 diff。
+
+**/Dockerfile text eol=lf
+**/.dockerignore text eol=lf
+frontend/nginx.conf text eol=lf
+frontend/music-studio-security.conf text eol=lf
+docker-compose.yml text eol=lf
+deploy/docker-compose.yml text eol=lf
+# uv 的两份清单也固定 LF：uv.lock 由工具生成，跨平台差异会让锁文件频繁
+# 产生无意义的整文件 diff；pyproject.toml 用 LF 才能和 CI / Linux 保持一致。
+backend/pyproject.toml text eol=lf
+backend/uv.lock text eol=lf
+backend/.python-version text eol=lf
+
+# 证书按二进制处理，禁止任何换行/编码转换（PEM 被改写会直接导致 TLS 校验失败）
+*.crt -text
+*.pem -text

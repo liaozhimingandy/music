@@ -1,0 +1,218 @@
+# 构建并推送镜像到 Docker Hub + 阿里云 ACR。
+#
+# 为什么两个仓库都推：Docker Hub 给海外/CI/公开场景用，阿里云 ACR 给国内云
+# 服务器拉取用（国内拉 Docker Hub 经常超时）。服务器只需要改 .env 里的镜像
+# 地址就能在两个来源之间切换，compose 文件不用动。
+#
+# 需要配置（Settings -> Secrets and variables -> Actions）：
+#   Secrets（可选，配了才推）
+#     DOCKERHUB_USERNAME   Docker Hub 用户名；**不配则整段 Docker Hub 发布跳过**
+#     DOCKERHUB_PASSWORD   对应用户密码（用户密码登录，非 Access Token）
+#     ALIYUN_USERNAME      阿里云容器镜像服务的账号；**不配则阿里云发布跳过**
+#     ALIYUN_PASSWORD      对应密码 / 固定密码
+#   Variables（推荐）
+#     DOCKERHUB_NAMESPACE  镜像命名空间，缺省用仓库 owner
+#     DOCKER_PLATFORMS     目标架构，缺省 linux/amd64；ARM 服务器填 linux/amd64,linux/arm64
+#     ALIYUN_REGISTRY      例：registry.cn-hangzhou.aliyuncs.com（和 ALIYUN_USERNAME 同时配才生效）
+#     ALIYUN_NAMESPACE     例：your-namespace
+#
+# 登录策略：**只在用户名 secret 存在时才登录对应仓库**——没配用户名就整段跳过，
+# 不会因缺密码而报错；对应的镜像名也只在登录成功时才拼进推送列表。两个仓库都
+# 没配则跳过全部推送（仅做一次构建校验的价值有限，这里直接跳过以免空推送报错）。
+#
+# 产物标签：
+#   main 分支   -> latest、sha-<7位>
+#   v1.2.3 标签 -> v1.2.3、1.2.3、1.2、sha-<7位>
+#   手动触发    -> 在 main 上触发时同 main 分支
+
+name: Build and Push Images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "deploy/**"
+      - "docker-compose.yml"
+      - ".github/workflows/build-images.yml"
+    tags: ["v*"]
+  workflow_dispatch:
+
+# 同一个分支只保留最新一次构建；tag 推送不取消（发版镜像必须完整推完）。
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  # 命名空间没配时退回仓库 owner，fork 后也能直接用。
+  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || github.repository_owner }}
+  DOCKER_PLATFORMS: ${{ vars.DOCKER_PLATFORMS || 'linux/amd64' }}
+  ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
+  ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # 前端挂了也要看到后端的构建结果
+      matrix:
+        include:
+          - name: backend
+            context: ./backend
+            file: ./backend/Dockerfile
+            # 后端镜像不接受 Vite 变量，留空（传了 buildx 会警告 unused build arg）
+            build_args: ""
+          - name: frontend
+            context: ./frontend
+            file: ./frontend/Dockerfile
+            # 前端构建期配置：同源 /v1，由镜像内的 nginx 反代到 backend。
+            build_args: |
+              VITE_APP_API_BASE_URL=/v1
+              VITE_BASE_PATH=/
+              VITE_APP_IS_DEBUG=False
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ARM 目标需要 QEMU 才能在 x86 runner 上跑 arm64 的 pip/npm；
+      # 只构建 amd64 时这两个步骤几乎零开销。
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Docker Hub：只在配了 DOCKERHUB_USERNAME 时登录，否则整段跳过。
+      - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      # 阿里云：DOCKERHUB 那套独立；用户名 + 仓库地址 + 命名空间三者齐了才登录。
+      - name: Log in to Aliyun ACR
+        if: ${{ secrets.ALIYUN_USERNAME != '' && vars.ALIYUN_REGISTRY != '' && vars.ALIYUN_NAMESPACE != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      # 用脚本动态拼镜像列表：登录了哪个仓库就推哪个，没登录的绝不出现，
+      # 否则会产生 "/music-studio-backend" 这种非法镜像名直接报错。
+      - name: Resolve image names
+        id: images
+        env:
+          SERVICE: music-studio-${{ matrix.name }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          names=""
+          if [ -n "${DOCKERHUB_USERNAME:-}" ]; then
+            names="${names}${names:+$'\n'}${DOCKERHUB_NAMESPACE}/${SERVICE}"
+          fi
+          if [ -n "${ALIYUN_USERNAME:-}" ] && [ -n "${ALIYUN_REGISTRY:-}" ] && [ -n "${ALIYUN_NAMESPACE:-}" ]; then
+            names="${names}${names:+$'\n'}${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${SERVICE}"
+          fi
+          if [ -z "${names}" ]; then
+            echo "::error::未配置任何镜像仓库（请设置 DOCKERHUB_USERNAME 或 ALIYUN_USERNAME + ALIYUN_REGISTRY + ALIYUN_NAMESPACE），跳过构建推送。"
+            exit 1
+          fi
+          {
+            echo "list<<IMAGES_EOF"
+            echo "${names}"
+            echo "IMAGES_EOF"
+          } >> "${GITHUB_OUTPUT}"
+          echo "将推送："
+          echo "${names}"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.images.outputs.list }}
+          labels: |
+            org.opencontainers.image.title=Music Studio ${{ matrix.name }}
+            org.opencontainers.image.description=AI 音乐创作工作台（${{ matrix.name }}）
+            org.opencontainers.image.licenses=Apache-2.0
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short,prefix=sha-
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: ${{ env.DOCKER_PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ matrix.build_args }}
+          # GHA 缓存按服务分 scope，前后端的 layer 不会互相污染。
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # 冒烟测试：把刚推上去的后端镜像真的跑起来，确认进程能起、库能建、
+  # /v1/health 能返回。镜像「构建成功」不等于「能启动」——少个系统依赖、
+  # 非 root 写不了数据目录这类问题只有跑一次才会暴露。
+  smoke:
+    name: Smoke test backend image
+    needs: build
+    runs-on: ubuntu-latest
+    # 只在推送到仓库时验证；手动触发也跑（此时镜像已存在）。
+    # 注意这里必须用 vars 而不是 env：job 级 if 拿不到 workflow env 上下文，
+    # 写成 env.DOCKER_PLATFORMS 会永远取到空串导致整个 job 被跳过。
+    # 目标架构不含 amd64 时也跳过：runner 是 x86，跑不了纯 arm64 镜像。
+    # 没配 DOCKERHUB_USERNAME 时镜像不会推到 Docker Hub，拉取必然失败，整段跳过。
+    if: ${{ secrets.DOCKERHUB_USERNAME != '' && contains(vars.DOCKER_PLATFORMS || 'linux/amd64', 'amd64') }}
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Run container and probe /v1/health
+        run: |
+          set -euo pipefail
+          image="${DOCKERHUB_NAMESPACE}/music-studio-backend:sha-${GITHUB_SHA:0:7}"
+          echo "验证镜像：${image}"
+          docker pull "${image}"
+          docker rm -f music-smoke >/dev/null 2>&1 || true
+          # mock 模式：不联网、不需要密钥，但建表/健康检查/静态资源路径全走真实代码。
+          docker run -d --name music-smoke -p 8788:8788 \
+            -e MUSIC_STUDIO_MOCK=true "${image}"
+
+          for i in $(seq 1 30); do
+            if body="$(curl -fsS http://127.0.0.1:8788/v1/health 2>/dev/null)"; then
+              echo "健康检查通过：${body}"
+              echo "--- 容器日志 ---"
+              docker logs music-smoke
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::后端镜像启动后 60 秒内 /v1/health 未就绪"
+          echo "--- 容器状态 ---"
+          docker ps -a --filter name=music-smoke
+          echo "--- 容器日志 ---"
+          docker logs music-smoke || true
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f music-smoke >/dev/null 2>&1 || true

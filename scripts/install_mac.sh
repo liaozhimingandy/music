@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
 # Music Studio 一次性安装（macOS / Linux）
+# 依赖管理用 uv（https://docs.astral.sh/uv/），没装的话：
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
 # 云端推理后端不需要本地模型权重 / GPU / torch。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-PY_ENV="$ROOT_DIR/backend/.venv"
 NODE_DIR="$ROOT_DIR/frontend"
 ENV_EXAMPLE="$ROOT_DIR/backend/app/.env.example"
 ENV_FILE="$ROOT_DIR/backend/app/.env"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "未找到 python3，请安装 Python 3.10+" >&2
+if ! command -v uv >/dev/null 2>&1; then
+  echo "未找到 uv，请先安装：curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
   exit 1
 fi
 
-echo "==> 创建 Python 虚拟环境"
-if [[ ! -x "$PY_ENV/bin/python" ]]; then
-  "$PYTHON_BIN" -m venv "$PY_ENV"
-fi
-
-echo "==> 安装后端依赖（FastAPI / httpx / Jinja2 / pydantic-settings）"
-"$PY_ENV/bin/python" -m pip install --upgrade pip
-"$PY_ENV/bin/python" -m pip install -e "$ROOT_DIR/backend"
+echo "==> 同步后端依赖（uv sync，虚拟环境在 backend/.venv）"
+(cd "$ROOT_DIR" && uv sync --project backend)
 
 echo "==> 安装前端依赖"
 (cd "$NODE_DIR" && npm install)

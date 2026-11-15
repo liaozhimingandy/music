@@ -1,0 +1,71 @@
+# 生产部署编排：只拉镜像，不在服务器上编译。
+#
+# 用法（把这个目录下的两个文件放到服务器同一目录）：
+#   cp .env.example .env      # 填镜像地址与密钥
+#   docker compose pull && docker compose up -d
+#
+# 镜像来自 GitHub Actions 的推送（见 .github/workflows/build-images.yml）：
+#   Docker Hub : docker.io/<用户名>/music-studio-backend:<tag>
+#   阿里云 ACR : registry.cn-hangzhou.aliyuncs.com/<命名空间>/music-studio-backend:<tag>
+#
+# 为什么不写 build：服务器上没有 node/python 工具链也无所谓，构建产物由 CI
+# 统一产出，服务器只负责拉取与运行；回滚就是改 IMAGE_TAG 再 up -d。
+
+name: music-studio
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  backend:
+    # 必填：缺失时 compose 会直接报错并给出提示，避免静默拉错镜像。
+    image: ${BACKEND_IMAGE:?请在 .env 里设置 BACKEND_IMAGE，例如 docker.io/yourname/music-studio-backend:latest}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      MUSIC_STUDIO_DATA_DIR: /app/data
+      MUSIC_STUDIO_PORT: "8788"
+      MUSIC_STUDIO_TRUST_PROXY: "true"
+    volumes:
+      - music-data:/app/data
+    expose:
+      - "8788"
+    # 生产再加一道兜底：镜像自带 HEALTHCHECK，这里不重复定义，
+    # 用 docker inspect --format '{{.State.Health.Status}}' 查看。
+    logging: *default-logging
+    # 崩溃/重启策略之外的资源护栏：防止单个异常任务把宿主机 CPU 打满。
+    # 服务器核数小的可以调低 cpus；队列本身有 MUSIC_STUDIO_MAX_ACTIVE_JOBS 限并发。
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1024M
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?请在 .env 里设置 FRONTEND_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      # 只绑回环时改成 "127.0.0.1:${WEB_PORT:-8088}:80"，再由宿主机 nginx/caddy
+      # 做 HTTPS 终止；直接对公网提供服务就保持 0.0.0.0 绑定。
+      - "${WEB_PORT:-8088}:80"
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+
+volumes:
+  music-data:
+    # 固定卷名：compose 换目录、重命名也不会丢数据。
+    # 备份用 docker run --rm -v music-studio-data:/data -v $PWD:/backup alpine \
+    #   tar czf /backup/music-data-$(date +%F).tar.gz -C /data .
+    name: music-studio-data

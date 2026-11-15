@@ -6,11 +6,17 @@ name: Deploy Frontend to GitHub Pages
 # 一次性设置：仓库 Settings → Pages → Build and deployment → Source 选 "GitHub Actions"。
 # 之后每次 push 到 main 且前端文件变化，或手动 workflow_dispatch，即自动构建部署。
 #
+# 资源基址（base）策略 —— 这里不再强制注入 VITE_BASE_PATH：
+# * 自定义域名（如 https://music.openaim.cn）站点在**根路径**，base 必须是 "/"，
+#   这正是 frontend/.env.production 里 VITE_BASE_PATH 的默认值，直接沿用；
+# * 若部署成 GitHub Pages 项目页（https://<owner>.github.io/<repo>/），
+#   在仓库 Variables 里加 PAGES_BASE_PATH=/<repo>/ 即可，workflow 会透传。
+# 早期版本无条件写死 /<repo>/，导致自定义域名下 index.html 去 /<repo>/assets/*.js
+# 取文件而 404（现象就是「找不到 js 文件」），现在改为默认跟随 env、按需覆盖。
+#
 # 说明：
-# - GitHub Pages 是纯静态托管，没有 FastAPI 后端，页面会自动进入演示模式；
-#   如需连真实后端，在 .env.production 里把 VITE_APP_API_BASE_URL 配成完整地址（需后端开启 CORS）。
-# - 项目页 URL 形如 https://<owner>.github.io/<repo>/，因此 Vite base 必须是 /<repo>/；
-#   这里用 CI 注入的 VITE_BASE_PATH=/${{ github.event.repository.name }}/，fork 后无需改配置。
+# - GitHub Pages 是纯静态托管，没有 FastAPI 后端；接口地址在 .env.production 的
+#   VITE_APP_API_BASE_URL（需后端开启 CORS）。
 # - 无需任何 token / secret，使用官方 Pages Actions 的 OIDC 权限即可。
 # =============================================================================
 on:
@@ -32,6 +38,9 @@ concurrency:
 
 env:
   NODE_VERSION: '22'
+  # 自定义域名（Settings → Pages 里绑定的那个）。留空则不写 CNAME 文件。
+  # 写进产物可以避免「每次 Actions 部署把 Settings 里的自定义域名冲掉」。
+  PAGES_CUSTOM_DOMAIN: music.openaim.cn
 
 jobs:
   build:
@@ -58,27 +67,45 @@ jobs:
       - name: 类型检查与构建
         working-directory: frontend
         env:
-          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          # 仅当仓库配置了 PAGES_BASE_PATH 变量时才覆盖 base；默认空 -> 用 .env.production 的值
+          VITE_BASE_PATH: ${{ vars.PAGES_BASE_PATH }}
           VITE_APP_BUILD: ${{ github.sha }}
-        run: npm run build
+        run: |
+          set -euo pipefail
+          if [ -z "${VITE_BASE_PATH:-}" ]; then
+            unset VITE_BASE_PATH
+            echo "未设置 PAGES_BASE_PATH，使用 frontend/.env.production 里的 base"
+          else
+            echo "使用仓库变量 PAGES_BASE_PATH=${VITE_BASE_PATH} 作为 base"
+          fi
+          npm run build
 
       - name: 校验构建产物
         working-directory: frontend
-        env:
-          PAGES_BASE: /${{ github.event.repository.name }}/
         run: |
           set -euo pipefail
-          test -f dist/index.html
-          asset=$(grep -oE 'assets/[A-Za-z0-9._-]+\.js' dist/index.html | head -1)
-          test -n "$asset" || { echo "::error::index.html 没有引用任何 js 资源"; exit 1; }
-          test -f "dist/${asset}" || { echo "::error::index.html 引用的 ${asset} 不存在"; exit 1; }
-          grep -q "${PAGES_BASE}assets/" dist/index.html || {
-            echo "::error::Vite base 未生效，资源路径不是 ${PAGES_BASE}assets/"; exit 1;
-          }
+          test -f dist/index.html || { echo "::error::缺少 dist/index.html"; exit 1; }
+
+          # 从 index.html 取入口脚本路径（/assets/index-xxx.js 或 ./assets/…），
+          # 不再假设固定 base 前缀，自定义域名（/）与项目页（/repo/）都能通过。
+          entry=$(grep -oE '"[^"]*assets/[A-Za-z0-9._-]+\.js"' dist/index.html | head -1 | tr -d '"' || true)
+          test -n "$entry" || { echo "::error::index.html 没有引用任何 js 资源"; exit 1; }
+
+          asset="${entry#./}"          # ./assets/x.js -> assets/x.js
+          asset="${asset#/}"           # /assets/x.js  -> assets/x.js
+          test -f "dist/${asset}" || { echo "::error::index.html 引用的 ${entry} 在 dist 里不存在"; exit 1; }
+
           # SPA 深链兜底 + 关闭 Jekyll（避免 _ 开头资源被忽略）
           cp dist/index.html dist/404.html
           touch dist/.nojekyll
-          echo "入口资源: ${asset}"
+
+          # 自定义域名：写 CNAME 到产物根目录，Actions 部署后仍保留该域名
+          if [ -n "${PAGES_CUSTOM_DOMAIN:-}" ]; then
+            echo "${PAGES_CUSTOM_DOMAIN}" > dist/CNAME
+            echo "自定义域名: ${PAGES_CUSTOM_DOMAIN}"
+          fi
+
+          echo "入口资源: ${entry}"
           echo "产物文件数: $(find dist -type f | wc -l)"
 
       - name: 配置 GitHub Pages

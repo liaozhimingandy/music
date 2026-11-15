@@ -1,22 +1,22 @@
 # Music Studio 一次性安装（Windows PowerShell）
+# 依赖管理用 uv（https://docs.astral.sh/uv/），没有的话先装：
+#   powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 # 云端推理后端不需要本地模型权重 / GPU / torch。
 $ErrorActionPreference = "Stop"
 
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Definition)
-$pyEnv = Join-Path $ROOT "backend/.venv"
 $envExample = Join-Path $ROOT "backend/app/.env.example"
 $envFile = Join-Path $ROOT "backend/app/.env"
 
-Write-Host "==> 创建 Python 虚拟环境"
-if (-not (Test-Path (Join-Path $pyEnv "Scripts/python.exe"))) {
-  python -m venv $pyEnv
-  if ($LASTEXITCODE -ne 0) { throw "创建虚拟环境失败，请确认已安装 Python 3.10+ 并加入 PATH" }
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+  throw "未找到 uv，请先安装：powershell -c ""irm https://astral.sh/uv/install.ps1 | iex"""
 }
 
-Write-Host "==> 安装后端依赖（FastAPI / httpx / Jinja2 / pydantic-settings）"
-& (Join-Path $pyEnv "Scripts/python.exe") -m pip install --upgrade pip
-& (Join-Path $pyEnv "Scripts/python.exe") -m pip install -e (Join-Path $ROOT "backend")
-if ($LASTEXITCODE -ne 0) { throw "后端依赖安装失败" }
+Write-Host "==> 同步后端依赖（uv sync，虚拟环境在 backend/.venv）"
+Push-Location $ROOT
+uv sync --project backend
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw "后端依赖安装失败" }
+Pop-Location
 
 Write-Host "==> 安装前端依赖"
 Push-Location (Join-Path $ROOT "frontend")

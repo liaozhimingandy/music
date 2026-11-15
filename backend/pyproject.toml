@@ -1,3 +1,15 @@
+# Music Studio 后端依赖清单（uv 管理，uv.lock 锁定精确版本）。
+#
+# 常用命令（在仓库根执行）：
+#   uv sync --project backend                  # 创建/更新 backend/.venv
+#   uv run --project backend uvicorn app.main:app --app-dir backend --port 8788
+#   uv add --project backend <包名>            # 加依赖（会同时更新 uv.lock）
+#   uv lock --project backend                  # 只重算锁文件
+#
+# 为什么用 uv：解析依赖是秒级、锁文件可复现、镜像构建直接 `uv sync --frozen`
+# 就能保证和本地完全一致（不再需要维护一份 requirements.txt 的复制品）。
+# 改版本时只改这里 + 提交重新生成的 uv.lock，不要手写锁文件。
+
 [project]
 name = "music-studio-backend"
 version = "0.1.0"
@@ -13,11 +25,28 @@ dependencies = [
   "httpx>=0.27.0",
   "Jinja2>=3.1.0",
   "aiosqlite>=0.20.0",
+  "loguru>=0.7.2",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "ruff"]
+# 开发/测试依赖（PEP 735 依赖组）：`uv sync --group dev` 才会装，
+# 生产镜像用 `uv sync --frozen --no-dev` 跳过，镜像里不带 pytest / ruff。
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
 
-[build-system]
-requires = ["setuptools>=68.0.0", "wheel"]
-build-backend = "setuptools.build_meta"
+[tool.uv]
+# 这不是一个要发布的 Python 包：源码通过 --app-dir 直接运行，
+# 关掉「把本项目装进 site-packages」的行为，`uv sync` 只装第三方依赖。
+package = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/F 是语法与未使用变量这类硬错误；其余风格项按需再开，避免一次改太多。
+select = ["E", "F", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# 冒烟测试的断言消息是中文，字符数容易超过 120（终端里显示更宽），
+# 拆行反而降低可读性，所以只对测试放开行宽限制。
+"**/tests/*" = ["E501"]

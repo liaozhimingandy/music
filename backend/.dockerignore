@@ -1,0 +1,36 @@
+# 后端构建上下文里不该出现的东西。
+# 注意：.env 必须排除——里面有真实密钥，拷进镜像等于把密钥公开在 registry 里。
+app/.env
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python 缓存与本地虚拟环境
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 测试与本地数据（镜像里不该带测试，也不该带开发期间的库和音频）
+tests/
+data/
+app/data/
+app/outputs/
+*.db
+*.sqlite3
+
+# 开发/编辑相关
+.git/
+.gitignore
+.idea/
+.vscode/
+*.log
+Dockerfile
+.dockerignore
+# README.md 刻意保留在构建上下文里：pyproject.toml 的 readme 指向它，
+# uv 解析项目元数据时不应该因为文件缺失而报错（镜像里不会 COPY 它）。
