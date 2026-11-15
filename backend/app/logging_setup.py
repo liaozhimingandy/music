@@ -110,6 +110,44 @@ def _resolve_log_dir(config: Any) -> Path:
     return Path(getattr(config, "data_dir", "data")) / "logs"
 
 
+def _install_stdlib_bridge(debug: bool) -> None:
+    """把标准库 ``logging`` 的记录转发给 loguru（幂等，可重复调用）。
+
+    Args:
+        debug: True 时把 httpx 等库的门槛放宽到 DEBUG，其余保持 INFO。
+    """
+    # 标准库 -> loguru：force=True 清掉可能已存在的 root handler。
+    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+    for name in _INTERCEPTED_LOGGERS:
+        std_logger = logging.getLogger(name)
+        std_logger.handlers = [InterceptHandler()]
+        std_logger.propagate = False
+        if name in ("httpx", "httpcore"):
+            # httpx 的 INFO 是「每发一个请求打一行」，INFO 模式下太吵；
+            # 排查网络问题时把 DEBUG 打开即可看到完整请求日志。
+            std_logger.setLevel(logging.DEBUG if debug else logging.WARNING)
+        elif name in _QUIET_LOGGERS:
+            std_logger.setLevel(logging.INFO)  # 恒定压噪音，不随 DEBUG 放宽
+        else:
+            std_logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+
+def ensure_loguru_bridge() -> None:
+    """重新安装「标准库 -> loguru」的转发，用来覆盖 uvicorn 的 dictConfig。
+
+    为什么需要它：容器里用的是 FastAPI 官方推荐的 ``fastapi run`` 启动方式，
+    它会**先 import 应用模块**来定位 app 实例——此时 ``setup_logging()`` 已经
+    跑过、桥接装好了；紧接着 uvicorn 的 ``Config.configure_logging()`` 再用
+    ``dictConfig`` 覆盖 ``uvicorn`` / ``uvicorn.access`` 这几个 logger 的
+    handler，导致 uvicorn 自己的启动日志、access 日志不再落到 loguru 文件
+    （而应用自身的日志仍会落盘，因为它们走 root logger）。
+
+    在应用的 lifespan 启动时再装一次即可补回来——那时 dictConfig 已经执行完，
+    不会再被覆盖。
+    """
+    _install_stdlib_bridge(bool(getattr(settings, "debug", False)))
+
+
 def setup_logging(config: Any = None) -> Path | None:
     """初始化全局日志，返回日志目录（文件日志关闭时返回 None）。
 
@@ -157,20 +195,8 @@ def setup_logging(config: Any = None) -> Path | None:
             enqueue=False,             # 单进程异步应用，同步写更可控、不丢尾部日志
         )
 
-    # 标准库 -> loguru：force=True 清掉可能已存在的 root handler。
-    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
-    for name in _INTERCEPTED_LOGGERS:
-        std_logger = logging.getLogger(name)
-        std_logger.handlers = [InterceptHandler()]
-        std_logger.propagate = False
-        if name in ("httpx", "httpcore"):
-            # httpx 的 INFO 是「每发一个请求打一行」，INFO 模式下太吵；
-            # 排查网络问题时把 DEBUG 打开即可看到完整请求日志。
-            std_logger.setLevel(logging.DEBUG if debug else logging.WARNING)
-        elif name in _QUIET_LOGGERS:
-            std_logger.setLevel(logging.INFO)  # 恒定压噪音，不随 DEBUG 放宽
-        else:
-            std_logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    # 标准库 -> loguru（转发桥接）。
+    _install_stdlib_bridge(debug)
 
     return log_dir
 

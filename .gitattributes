@@ -11,7 +11,7 @@
 **/Dockerfile text eol=lf
 **/.dockerignore text eol=lf
 docker-compose.yml text eol=lf
-deploy/docker-compose.yml text eol=lf
+backend/docker-compose.yml text eol=lf
 # uv 的两份清单也固定 LF：uv.lock 由工具生成，跨平台差异会让锁文件频繁
 # 产生无意义的整文件 diff；pyproject.toml 用 LF 才能和 CI / Linux 保持一致。
 backend/pyproject.toml text eol=lf

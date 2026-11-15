@@ -1,6 +1,10 @@
 """Music Studio FastAPI 入口。
 
-启动：``python run.py``（在 backend/ 目录下执行；绑定地址读 .env 的 HOST/PORT）
+启动：
+* 本机：``uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788``
+  （地址端口由 backend/.env 的 HOST / PORT 决定）
+* 容器：``fastapi run app/main.py --port 8000``（FastAPI 官方推荐写法，
+  见 backend/Dockerfile）
 分层：``routers -> service -> dal -> model``（SQLite3）。
 
 应用生命周期（async lifespan）：
@@ -27,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .dal import close_connection, init_schema
-from .logging_setup import log_startup_summary, setup_logging
+from .logging_setup import ensure_loguru_bridge, log_startup_summary, setup_logging
 from .middleware import UnhandledErrorMiddleware
 from .routers import api_v1
 from .services import runtime
@@ -43,6 +47,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001 - FastAPI 约定的签名
     """启动建表、恢复队列、关闭清理；TestClient 进入 with 时也会走这里。"""
+    # `fastapi run`（FastAPI 官方推荐的容器启动方式）会先 import 本模块，
+    # 之后 uvicorn 才用 dictConfig 覆盖 uvicorn.* 的 logger，把上面的转发桥接
+    # 冲掉——这里在 lifespan 启动时补装一次，uvicorn 的启动 / access 日志
+    # 就也能落进 loguru 文件了。详见 logging_setup.ensure_loguru_bridge。
+    ensure_loguru_bridge()
     await init_schema()
     # 第一行就打「进程内真实生效的配置」，排查「改了 .env 没生效」先看它。
     log_startup_summary()
