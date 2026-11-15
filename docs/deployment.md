@@ -68,11 +68,13 @@ MUSIC_STUDIO_MOCK=true docker compose up -d --build   # 离线演示，不联网
 
 | 类型 | 名称 | 值 |
 | --- | --- | --- |
-| Variable | `ALIYUN_REGISTRY` | `registry.cn-hangzhou.aliyuncs.com` |
-| Variable | `ALIYUN_NAMESPACE` | 命名空间，如 `liao-music` |
-| Secret | `ALIYUN_USERNAME` | ACR 用户名 |
-| Secret | `ALIYUN_PASSWORD` | ACR 固定密码 |
+| Variable **或** Secret | `ALIYUN_REGISTRY` | `registry.cn-hangzhou.aliyuncs.com` |
+| Variable **或** Secret | `ALIYUN_NAMESPACE` | 命名空间，如 `liao-music` |
+| Variable **或** Secret | `ALIYUN_USERNAME` | ACR 用户名 |
+| Variable **或** Secret | `ALIYUN_PASSWORD` | ACR 固定密码 |
 
+> `ALIYUN_*` 四个值**放 Variables 或 Secrets 都行**（工作流会同时读两者，secret 优先）。常见坑：只配了 `ALIYUN_USERNAME`/`ALIYUN_PASSWORD` 却漏了 `ALIYUN_REGISTRY`/`ALIYUN_NAMESPACE`，或把 registry/namespace 写成了别的名字，都会导致「判定为未配置、整段跳过」。工作流第一步 `Resolve registry flags` 会打印每个变量是 `set` 还是 `EMPTY`，照着补即可。
+>
 > 阿里云这四个变量是可选的：**不配就只推 Docker Hub**，工作流会自动跳过 ACR 登录和推送，不会报错。
 
 ### 3. 架构

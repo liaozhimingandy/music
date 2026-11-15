@@ -10,7 +10,7 @@
 #     DOCKERHUB_PASSWORD   对应用户密码（用户密码登录，非 Access Token）
 #     ALIYUN_USERNAME      阿里云容器镜像服务的账号；**不配则阿里云发布跳过**
 #     ALIYUN_PASSWORD      对应密码 / 固定密码
-#   Variables（推荐）
+#   Variables（或 Secrets，二者皆可；工作流会同时读取，secrets 优先）
 #     DOCKERHUB_NAMESPACE  镜像命名空间，缺省用仓库 owner
 #     DOCKER_PLATFORMS     目标架构，缺省 linux/amd64；ARM 服务器填 linux/amd64,linux/arm64
 #     ALIYUN_REGISTRY      例：registry.cn-hangzhou.aliyuncs.com（和 ALIYUN_USERNAME 同时配才生效）
@@ -51,8 +51,10 @@ env:
   # 命名空间没配时退回仓库 owner，fork 后也能直接用。
   DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || github.repository_owner }}
   DOCKER_PLATFORMS: ${{ vars.DOCKER_PLATFORMS || 'linux/amd64' }}
-  ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
-  ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+  # 兼容：ALIYUN_REGISTRY / ALIYUN_NAMESPACE 既可能配在 Variables 也可能配在 Secrets，
+  # 这里统一从两者取（secrets 优先），避免用户放错位置导致整段跳过。
+  ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY || secrets.ALIYUN_REGISTRY }}
+  ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE || secrets.ALIYUN_NAMESPACE }}
 
 jobs:
   build:
@@ -84,12 +86,18 @@ jobs:
       - name: Resolve registry flags
         id: registry
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
-          ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
-          ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+          # 兼容：ALIYUN_* 既可放 Secrets 也可放 Variables（secrets 优先），避免用户放错位置导致整段跳过。
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME || vars.ALIYUN_USERNAME }}
+          ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY || vars.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE || vars.ALIYUN_NAMESPACE }}
         run: |
           set -euo pipefail
+          # 诊断：只打印「是否配置」，绝不打印敏感值，方便定位到底哪个变量没配/放错位置。
+          echo "DOCKERHUB_USERNAME: $([ -n "${DOCKERHUB_USERNAME:-}" ] && echo set || echo EMPTY)"
+          echo "ALIYUN_USERNAME:    $([ -n "${ALIYUN_USERNAME:-}" ] && echo set || echo EMPTY)"
+          echo "ALIYUN_REGISTRY:    $([ -n "${ALIYUN_REGISTRY:-}" ] && echo set || echo EMPTY)"
+          echo "ALIYUN_NAMESPACE:   $([ -n "${ALIYUN_NAMESPACE:-}" ] && echo set || echo EMPTY)"
           if [ -n "${DOCKERHUB_USERNAME:-}" ]; then
             echo "dockerhub=true" >> "$GITHUB_OUTPUT"
           else
@@ -106,17 +114,17 @@ jobs:
         if: ${{ steps.registry.outputs.dockerhub == 'true' }}
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+          username: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD || vars.DOCKERHUB_PASSWORD }}
 
       # 阿里云：DOCKERHUB 那套独立；用户名 + 仓库地址 + 命名空间三者齐了才登录。
       - name: Log in to Aliyun ACR
         if: ${{ steps.registry.outputs.aliyun == 'true' }}
         uses: docker/login-action@v3
         with:
-          registry: ${{ vars.ALIYUN_REGISTRY }}
-          username: ${{ secrets.ALIYUN_USERNAME }}
-          password: ${{ secrets.ALIYUN_PASSWORD }}
+          registry: ${{ vars.ALIYUN_REGISTRY || secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME || vars.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD || vars.ALIYUN_PASSWORD }}
 
       # 用脚本动态拼镜像列表：登录了哪个仓库就推哪个，没登录的绝不出现，
       # 否则会产生 "/music-studio-backend" 这种非法镜像名直接报错。
@@ -124,10 +132,10 @@ jobs:
         id: images
         env:
           SERVICE: music-studio-${{ matrix.name }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
-          ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
-          ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME || vars.ALIYUN_USERNAME }}
+          ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY || vars.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE || vars.ALIYUN_NAMESPACE }}
         run: |
           set -euo pipefail
           names=""
