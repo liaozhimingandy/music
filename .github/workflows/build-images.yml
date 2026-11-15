@@ -183,6 +183,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ matrix.build_args }}
+          # 关键：关闭 provenance/SBOM 断言。build-push-action@v6 默认开启，
+          # 会额外推送一个 application/vnd.oci.empty.v1+json 断言清单，阿里云 ACR
+          # 不识别该 manifest class，报
+          #   denied: unknown manifest class for application/vnd.oci.empty.v1+json
+          # 关掉后只推真实镜像清单，阿里云/Docker Hub 都能正常接收。
+          provenance: false
+          sbom: false
           # GHA 缓存按服务分 scope（目前仅 backend），不同镜像的 layer 不会互相污染。
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
