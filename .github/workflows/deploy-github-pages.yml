@@ -135,3 +135,30 @@ jobs:
       - name: 发布
         id: deployment
         uses: actions/deploy-pages@v4
+
+      # 部署概述：把「部署到哪、访问地址」写进运行 Summary 页面，并在日志中打印。
+      - name: 部署概述
+        if: ${{ success() }}
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          CUSTOM_DOMAIN: ${{ env.PAGES_CUSTOM_DOMAIN }}
+        run: |
+          set -euo pipefail
+          domain="${CUSTOM_DOMAIN:-（未设置）}"
+          {
+            echo "## 🌐 前端部署概述"
+            echo ""
+            echo "**部署目标**：GitHub Pages（纯静态站点，不含 FastAPI 后端）"
+            echo ""
+            echo "### 访问地址"
+            echo "- Pages 默认地址：${PAGE_URL}"
+            echo "- 自定义域名：${domain}"
+            echo ""
+            echo "### 说明"
+            echo "- 接口地址见 frontend/.env.production 的 VITE_APP_API_BASE_URL，需后端开启 CORS。"
+            echo "- 已生成 404.html 用于 SPA 深链回退，.nojekyll 防止 Jekyll 处理 _ 开头资源。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::group::🌐 前端部署概述"
+          echo "Pages 地址  : ${PAGE_URL}"
+          echo "自定义域名  : ${domain}"
+          echo "::endgroup::"

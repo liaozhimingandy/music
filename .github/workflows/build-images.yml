@@ -194,6 +194,48 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
+      # 构建概述：把「推到了哪些仓库、镜像地址、本次标签」写进运行 Summary 页
+      # 面，同时在日志里用 group 折叠打印，方便一眼核对推送结果。
+      - name: 构建概述
+        if: ${{ steps.images.outputs.list != '' }}
+        env:
+          DOCKERHUB_PUSHED: ${{ steps.registry.outputs.dockerhub }}
+          ALIYUN_PUSHED: ${{ steps.registry.outputs.aliyun }}
+          IMAGES: ${{ steps.images.outputs.list }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          dh=$([ "${DOCKERHUB_PUSHED}" = "true" ] && echo "✅ 已推送" || echo "⏭️ 跳过（未配置 DOCKERHUB_USERNAME）")
+          acr=$([ "${ALIYUN_PUSHED}" = "true" ] && echo "✅ 已推送" || echo "⏭️ 跳过（未配置 ALIYUN_USERNAME/REGISTRY/NAMESPACE）")
+          {
+            echo "## 🐳 镜像构建概述"
+            echo ""
+            echo "**服务**：\`music-studio-${{ matrix.name }}\`"
+            echo ""
+            echo "### 推送目标仓库"
+            echo "- Docker Hub：${dh}"
+            echo "- 阿里云 ACR：${acr}"
+            echo ""
+            echo "### 镜像地址（base）"
+            echo '```text'
+            echo "${IMAGES}"
+            echo '```'
+            echo ""
+            echo "### 本次标签"
+            echo '```text'
+            echo "${TAGS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::group::🐳 镜像构建概述"
+          echo "服务        : music-studio-${{ matrix.name }}"
+          echo "Docker Hub  : ${dh}"
+          echo "阿里云 ACR  : ${acr}"
+          echo "镜像 base   :"
+          echo "${IMAGES}"
+          echo "标签        :"
+          echo "${TAGS}"
+          echo "::endgroup::"
+
       # 冒烟测试：把刚推上去的后端镜像真的跑起来，确认进程能起、库能建、
       # /v1/health 能返回。镜像「构建成功」不等于「能启动」——少个系统依赖、
       # 非 root 写不了数据目录这类问题只有跑一次才会暴露。
