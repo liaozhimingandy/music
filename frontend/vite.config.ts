@@ -1,6 +1,8 @@
 import { fileURLToPath, URL } from "node:url";
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import vue from "@vitejs/plugin-vue";
+import fs from "node:fs";
+import path from "node:path";
 
 /**
  * base 说明：
@@ -8,6 +10,30 @@ import vue from "@vitejs/plugin-vue";
  * - GitHub Pages 项目页："/<仓库名>/"，由 CI 注入 VITE_BASE_PATH 覆盖；
  *   本地构建默认 "/"，保证 npm run preview 可直接查看（process.env 优先于 .env 文件）。
  */
+/**
+ * 构建后把 index.html 复制成 404.html，供 GitHub Pages / Cloudflare 的 SPA 回退使用：
+ * 未知路由（如 /foo/bar）会返回这个带正确资源引用的壳，再由前端路由渲染 NotFound 组件。
+ * 注意必须复制「构建后的」index.html（已注入带 hash 的资源路径），不能复制源码里的 index.html。
+ */
+function spa404(): Plugin {
+  let outDir = "dist";
+  return {
+    name: "spa-404",
+    apply: "build",
+    configResolved(config) {
+      outDir = config.build.outDir;
+    },
+    closeBundle() {
+      const indexFile = path.resolve(outDir, "index.html");
+      const notFoundFile = path.resolve(outDir, "404.html");
+      if (fs.existsSync(indexFile)) {
+        fs.copyFileSync(indexFile, notFoundFile);
+        this.info?.("已生成 404.html（index.html 副本，用于 SPA 回退）");
+      }
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
   const base = process.env.VITE_BASE_PATH || env.VITE_BASE_PATH || "/";
@@ -27,7 +53,7 @@ export default defineConfig(({ mode }) => {
         "@": fileURLToPath(new URL("./src", import.meta.url)),
       },
     },
-    plugins: [vue()],
+    plugins: [vue(), spa404()],
     server: {
       port: 5175,
       host: "0.0.0.0",

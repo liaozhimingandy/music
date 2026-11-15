@@ -248,7 +248,7 @@ docker compose pull && docker compose up -d
 
 ```yaml
   deploy:
-    needs: [build, smoke]
+    needs: [build]
     runs-on: ubuntu-latest
     # 只部署 main 分支，发布 tag 不自动上线
     if: github.ref == 'refs/heads/main'
@@ -290,6 +290,27 @@ docker compose pull && docker compose up -d
 - **Cloudflare Pages / 其它**：本地 `cd frontend && npm run build`，把 `dist/` 上传即可；CI 用 `npm ci && npm run build` 同样产出 `dist/`。
 
 自定义域名在托管平台绑定（GitHub Pages 用 `PAGES_CUSTOM_DOMAIN` 写 CNAME；Cloudflare 直接在 DNS 面板接上）。
+
+### 7.1 前端路由与 404 回退（重要）
+
+前端现在用的是 **history 模式路由**（`createWebHistory`）：`/` 是工作台，任何匹配不到的路径（如 `/foo`、`/studio/x`）都渲染 404 页面。history 模式要求托管端对「不存在的路径」返回 `index.html`（SPA 回退），否则直接刷新子路由会得到 404。
+
+构建时已**自动把 `dist/index.html` 复制成 `dist/404.html`**（见 `frontend/vite.config.ts` 的 `spa404` 插件），这个副本带正确的 hash 资源引用。各平台用法：
+
+- **GitHub Pages**：由 `deploy-github-pages.yml` 在部署前 `cp dist/index.html dist/404.html`（已含），未知路径自动回退到 SPA 壳，再由前端路由渲染 404 页。无需额外配置。
+- **Cloudflare Pages**：默认就会对缺失路径返回 `404.html`，同样能正确回退；若想要深链返回 200，可在项目根放一个 `_redirects`：
+  ```text
+  /* /index.html 200
+  ```
+  ⚠️ **`/* /index.html 200` 的副作用**：它对所有「不存在的文件」都返回 `index.html`，包括**哈希已失效的旧资源**。举例：旧部署的 `index.html` 引用了 `/assets/index-ABC.js`，重部署后哈希变成 `index-XYZ.js`，若浏览器/用户手输访问到旧的 `/assets/index-ABC.js`（文件已不存在），Cloudflare 会回退成 `index.html` → 浏览器「打开成了首页」。**这正是你看到的 `https://music.openaim.cn/assets/index-CJtEQ1Z8.js 打开是首页` 的根因**。
+
+排查与规避：
+
+1. **确认每次部署都整包上传 `dist/`**（index.html + assets/ 一起），不要让 CDN/浏览器缓存旧的 `index.html`。正常情况下 `index.html` 引用的哈希一定存在，不会触发回退。
+2. 若想让「确实不存在的静态资源」老老实实返回 404（而不是 SPA 壳），把重写规则收窄到「非文件型路由」：用 Cloudflare 的 **Transform Rules / 一个 Worker** 只在路径不含 `.`（即不是带扩展名的文件）时才回退到 `index.html`，带扩展名且缺失的就返回 404。或者干脆改用 **hash 模式路由**（`createWebHashHistory`，URL 形如 `/#/studio`）——完全不需要服务器回退，最省心，代价是链接带 `#`。
+3. 访问一个**确实不存在的普通路由**（如 `https://music.openaim.cn/nope`）时，看到的是我们自己的「页面走丢了」404 页，而不是裸的首页——说明路由与回退都正常工作。
+
+> 体检：想确认回退配置对不对，浏览器开 DevTools 访问一个不存在的路径（如 `/zzz`），Network 里应看到返回的是 `index.html`（200 或 404 均可），页面应显示「页面走丢了」而非工作台。
 
 ## 八、数据备份与恢复
 
