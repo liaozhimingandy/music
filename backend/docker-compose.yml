@@ -1,0 +1,116 @@
+# 带 Traefik 反向代理的本地测试编排（一键起 Traefik + 后端）。
+#
+# 用法：
+#   cd backend
+#   # 可选：建 .env 填 LLM_API_KEY、MUSIC_API_TOKEN；不想填就开 mock 模式
+#   MUSIC_STUDIO_MOCK=true docker compose up -d --build
+#   浏览器打开 http://music.localhost  （*.localhost 会被解析到 127.0.0.1）
+#
+# 路由标签说明（核心）：
+#   traefik.enable=true                                 让 Traefik 接管本服务
+#   traefik.http.routers.music-studio.rule=Host(...)    按域名匹配
+#   traefik.http.services.music-studio.loadbalancer.server.port=8788
+#                                                         后端实际监听端口（容器内固定 8788）
+#
+# 两种用法：
+# 1) 本文件自带 Traefik，直接 docker compose up 就能测（默认 HTTP）。
+# 2) 你已有在跑的 Traefik：删掉下面的 traefik 服务，把 backend 挂到已有网络
+#    （见文末「接入已有 Traefik」注释），标签保持不变即可被现有 Traefik 发现。
+#
+# 切 HTTPS（Let's Encrypt）：取消 traefik 服务里 entrypoints.websecure /
+# certificatesresolvers.le.* 那几行注释，并把 backend 的 router 标签改成
+# entrypoints=websecure + 加 tls.certresolver=le（文内已注释好）。
+
+name: music-studio-backend
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  traefik:
+    image: traefik:v3.3
+    container_name: music-traefik
+    command:
+      - --api.insecure=true            # 本地测试用：http://localhost:8080 看仪表盘
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false   # 只有打了 enable=true 标签的服务才接管
+      - --entrypoints.web.address=:80
+      # —— 以下取消注释即可开启 HTTPS（Let's Encrypt）——
+      # - --entrypoints.websecure.address=:443
+      # - --certificatesresolvers.le.acme.tlschallenge=true
+      # - --certificatesresolvers.le.acme.email=${ACME_EMAIL:-you@example.com}
+      # - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+    ports:
+      - "80:80"
+      # - "443:443"
+      - "127.0.0.1:8080:8080"          # Traefik 仪表盘，仅本机
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # - traefik-cert:/letsencrypt
+    networks:
+      - traefik
+    logging: *default-logging
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # 本地构建用独立变量名，避免被意外打上远端 tag。
+    image: ${LOCAL_BACKEND_IMAGE:-music-studio/backend:local}
+    restart: unless-stopped
+    # 没有 .env 也能起（缺密钥状态 / mock 模式），方便先验证镜像。
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MUSIC_STUDIO_DATA_DIR: /app/data
+      MUSIC_STUDIO_PORT: "8788"
+      # 反代会写 X-Forwarded-For，开启后限流/单客户端并发按真实 IP 统计。
+      MUSIC_STUDIO_TRUST_PROXY: "true"
+      MUSIC_STUDIO_MOCK: ${MUSIC_STUDIO_MOCK:-false}
+    volumes:
+      # SQLite 库 + outputs 音频 + 阶段 JSON 全在这里，删卷 = 删全部作品。
+      - music-data:/app/data
+    networks:
+      - traefik
+    labels:
+      - traefik.enable=true
+      # 路由规则：按域名匹配。本地测试用 music.localhost；上云改成你的域名。
+      - traefik.http.routers.music-studio.rule=Host(`${BACKEND_DOMAIN:-music.localhost}`)
+      - traefik.http.routers.music-studio.entrypoints=web
+      # —— 开启 HTTPS 时改用下面两行（并打开 traefik 服务的 websecure/LE 注释）——
+      # - traefik.http.routers.music-studio.entrypoints=websecure
+      # - traefik.http.routers.music-studio.tls.certresolver=le
+      - traefik.http.routers.music-studio.service=music-studio
+      # 后端容器内固定监听 8788，Traefik 把流量转给这个端口。
+      - traefik.http.services.music-studio.loadbalancer.server.port=8788
+      # 健康检查探 /v1/health，不健康就不转发流量。
+      - traefik.http.services.music-studio.loadbalancer.healthcheck.path=/v1/health
+      - traefik.http.services.music-studio.loadbalancer.healthcheck.interval=10s
+      - traefik.http.services.music-studio.loadbalancer.healthcheck.timeout=5s
+    logging: *default-logging
+
+volumes:
+  music-data:
+  # traefik-cert:
+
+networks:
+  traefik:
+    name: music-studio-traefik
+
+# ———————————————————————————————————————————————
+# 接入已有 Traefik（不启本文件的 traefik 服务时）：
+#   1. 删掉上面的 traefik 服务及其 volumes/networks 条目；
+#   2. 把 backend 的 networks 改成你已有 Traefik 所在网络，例如：
+#        networks:
+#          - traefik   # 改成你现有的网络名，如 proxy / traefik_default
+#   3. 顶层 networks 删掉自定义定义，或改成 external：
+#        networks:
+#          traefik:
+#            external: true
+#            name: 你现有Traefik网络名
+#   其余 labels 原样保留即可。
+# ———————————————————————————————————————————————
