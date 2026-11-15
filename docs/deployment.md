@@ -9,7 +9,7 @@
   │  GitHub Pages / Cloudflare Pages（纯静态托管前端，可绑自定义域名）
   │  前端直接调用后端 /v1（不同源，依赖后端 CORS_ORIGINS 放行）
   ▼
-backend 容器（uvicorn）  :8788
+backend 容器（fastapi run / uvicorn）  :8000
   ├── FastAPI /v1 接口
   ├── SQLite（data/music_studio.db）
   └── outputs/（生成的音频、阶段 JSON）
@@ -21,17 +21,38 @@ backend 容器（uvicorn）  :8788
 
 | 镜像 | 内容 | 端口 |
 | --- | --- | --- |
-| `music-studio-backend` | Python 3.12 + FastAPI + SQLite，非 root 运行，数据在 `/app/data` | 8788（对外，建议经反代做 HTTPS） |
+| `music-studio-backend` | Python 3.12 + FastAPI + SQLite，非 root 运行，数据在 `/app/data` | 容器内固定 8000，对外由宿主机端口映射 + 反代做 HTTPS |
+
+### 容器启动方式（FastAPI 官方写法）
+
+`backend/Dockerfile` 对齐 [FastAPI 官方容器化文档](https://fastapi.tiangolo.com/zh/deployment/docker/)：依赖单独一层、代码放最后、`CMD` 用 **exec 形式**。
+
+```dockerfile
+CMD ["fastapi", "run", "app/main.py", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1,::1,172.16.0.0/12"]
+```
+
+三个要点：
+
+| 参数 | 作用 | 不加会怎样 |
+| --- | --- | --- |
+| `fastapi run app/main.py` | 官方推荐；CLI 会自动把路径翻译成 `app.main:app`，无需自己拼 import string | —— |
+| exec 形式（JSON 数组） | uvicorn 成为 PID 1，`docker stop` 的 SIGTERM 直达应用，走 lifespan 优雅关闭 | shell 形式会吞掉信号，容器要等超时才被杀 |
+| `--proxy-headers` | 官方文档明确要求：**跑在 Traefik / Nginx 这类 TLS 终止代理后面时必须加**，让后端信任 `X-Forwarded-Proto` | 后端看到的 scheme 永远是 http，生成的重定向 / 绝对 URL 会指向 `http://` |
+| `--forwarded-allow-ips` | 声明哪些来源算可信代理 | uvicorn 默认只信 `127.0.0.1`；Traefik 在 Docker 网络里源 IP 是网段地址，不加白名单则上面的 `--proxy-headers` 形同虚设 |
+
+> 本项目额外在 `backend/app/main.py` 的 lifespan 里补装了一次日志转发桥接：`fastapi run` 会先用 `dictConfig` 覆盖 uvicorn 的 logger，不补这一步的话 uvicorn 自己的启动 / access 日志不会落进 loguru 文件。详见 `backend/app/logging_setup.py` 的 `ensure_loguru_bridge`。
+
+健康检查**不放进 Dockerfile**（探针路径 / 超时 / 间隔属于部署策略），统一写在 `backend/docker-compose.yml` 的 `healthcheck` 里。
 
 ## 一、先在本机试跑（可选）
 
 ```bash
 cd <仓库根>
-cp deploy/.env.example .env      # 填 LLM_API_KEY / MUSIC_API_TOKEN，其余可先留空
+cp backend/.env.example .env      # 填 LLM_API_KEY / MUSIC_API_TOKEN，其余可先留空
 docker compose up -d --build
 ```
 
-后端起来后监听 8788；前端本地预览用 `cd frontend && npm run dev`（5175）。没配密钥想先看界面和动效：
+后端起来后宿主机监听 8788（容器内固定 8000）；前端本地预览用 `cd frontend && npm run dev`（5175）。没配密钥想先看界面和动效：
 
 ```bash
 MUSIC_STUDIO_MOCK=true docker compose up -d --build   # 离线演示，不联网不花钱
@@ -116,7 +137,7 @@ docker compose version      # 需要 Compose v2
 
 ```bash
 sudo mkdir -p /opt/music-studio && cd /opt/music-studio
-# 从仓库取 deploy/docker-compose.yml 与 deploy/.env.example
+# 从仓库取 backend/docker-compose.yml 与 backend/.env.example
 # 可以用 scp、也可以用 git clone 后只拷这两个文件
 cp .env.example .env
 vim .env
@@ -159,11 +180,11 @@ curl http://127.0.0.1:8788/v1/health    # 后端：{"status":"ok",...}
 
 ### 4. 只在回环暴露端口（推荐，配合宿主反代）
 
-`deploy/docker-compose.yml` 里把端口改成只绑本机，再由 Cloudflare Tunnel / 宿主 Nginx / Caddy 做 HTTPS 终止：
+`backend/docker-compose.yml` 里把端口改成只绑本机，再由 Cloudflare Tunnel / 宿主 Nginx / Caddy 做 HTTPS 终止：
 
 ```yaml
 ports:
-  - "127.0.0.1:${BACKEND_PORT:-8788}:8788"
+  - "127.0.0.1:${BACKEND_PORT:-8788}:8000"
 ```
 
 反过来，如果不打算在宿主机上再套一层反代，就用默认的 `0.0.0.0:8788` 并放行该端口（公网直连时务必用 HTTPS，见下）。
@@ -359,7 +380,7 @@ docker compose start backend
 
 ```bash
 cd frontend && npm run dev            # 5175
-uv run --project backend python backend/run.py
+uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
 ```
 
 改完代码想验证镜像：

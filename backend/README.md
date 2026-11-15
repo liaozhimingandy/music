@@ -121,7 +121,7 @@ uv sync --project backend                        # 建 backend/.venv，按 uv.lo
 cp backend/.env.example backend/.env
 
 # 3. 启动（在仓库根目录执行；绑定地址读 backend/.env 的 HOST/PORT，默认 0.0.0.0:8788）
-uv run --project backend python backend/run.py
+uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
 ```
 
 运行时依赖仅 8 个：fastapi / uvicorn / pydantic / pydantic-settings / python-dotenv / httpx / Jinja2 / aiosqlite，无需 torch 或本地模型权重。加依赖用 `uv add --project backend <包名>`，它会同时更新 `uv.lock`（锁文件必须一起提交，镜像构建用 `uv sync --frozen` 保证一致）。
@@ -134,7 +134,7 @@ Windows 也可用 `scripts/start.bat` 一次启动前后端。
 ```bash
 # 只起后端，数据落到命名卷
 docker build -t music-studio-backend ./backend
-docker run -d --name music-backend -p 8788:8788 -v music-data:/app/data \
+docker run -d --name music-backend -p 8000:8000 -v music-data:/app/data \
   -e MUSIC_API_TOKEN=xxx -e LLM_API_KEY=xxx music-studio-backend
 
 # 只跑后端（前端走 GitHub Pages / Cloudflare 静态托管，直接调 /v1，需在 CORS_ORIGINS 放行）

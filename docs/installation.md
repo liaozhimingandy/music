@@ -52,7 +52,7 @@ $EDITOR backend/.env     # 填入密钥
 
 ```bash
 # 后端（仓库根目录；Windows / macOS / Linux 命令一致）
-uv run --project backend python backend/run.py
+uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
 
 # 前端（另一个终端）
 cd frontend && npm run dev
@@ -67,7 +67,7 @@ Windows 可用 `scripts/start.bat`、macOS/Linux 用 `scripts/start.sh` 一次�
 不消耗任何 API 额度即可跑通完整五阶段流程（本地合成 8 秒 WAV，前端可播放）：
 
 ```bash
-MUSIC_STUDIO_MOCK=true uv run --project backend python backend/run.py
+MUSIC_STUDIO_MOCK=true uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
 ```
 
 也可把 `MUSIC_STUDIO_MOCK=true` 写进 `backend/.env`。

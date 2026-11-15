@@ -313,7 +313,7 @@ X-Deduplicated: true
 uv run --project backend python backend/tests/smoke_test.py
 
 # 启动真实服务
-uv run --project backend python backend/run.py
+uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
 curl http://localhost:8788/v1/health
 curl http://localhost:8788/v1/history
 ```

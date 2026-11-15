@@ -48,7 +48,7 @@ uv sync --project backend                                    # 建 backend/.venv
 cp backend/.env.example backend/.env                 # 填入 LLM / ModelScope 密钥
 
 # 启动（仓库根目录）
-uv run --project backend python backend/run.py
+uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
 ```
 
 依赖版本由 `backend/uv.lock` 锁定，`uv sync` 按锁文件安装；新增依赖用 `uv add --project backend <包名>`（会一并更新锁文件，别手改）。生产镜像里是 `uv sync --frozen --no-dev`，与本地完全一致。
@@ -94,7 +94,7 @@ uv run --project backend python backend/run.py
 **本地一条命令试跑**：
 
 ```bash
-cp deploy/.env.example .env          # 填 LLM_API_KEY / MUSIC_API_TOKEN
+cp backend/.env.example .env          # 填 LLM_API_KEY / MUSIC_API_TOKEN
 docker compose up -d --build         # http://localhost:8088
 MUSIC_STUDIO_MOCK=true docker compose up -d --build   # 没密钥先看界面
 ```
@@ -102,7 +102,7 @@ MUSIC_STUDIO_MOCK=true docker compose up -d --build   # 没密钥先看界面
 **服务器部署**（只拉镜像，不在服务器编译）：
 
 ```bash
-cp deploy/docker-compose.yml deploy/.env.example /opt/music-studio/
+cp backend/docker-compose.yml backend/.env.example /opt/music-studio/
 cd /opt/music-studio && mv .env.example .env && vim .env   # 改镜像地址与密钥
 docker compose pull && docker compose up -d
 ```
@@ -223,7 +223,6 @@ backend/app/
 │   ├── pyproject.toml  # 依赖声明（uv 管理）
 │   └── uv.lock         # 锁定的依赖版本，镜像构建用 --frozen 保证一致
 ├── frontend/           # 中文单页前端（Vue 3），构建产物由 GitHub Pages 静态托管
-├── deploy/             # 生产部署：拉镜像的 compose + .env 模板
 ├── docker-compose.yml  # 本地/源码构建版编排
 ├── docs/               # 安装指南、接口清单、Docker 部署、截图
 ├── scripts/            # 各平台安装与启动脚本

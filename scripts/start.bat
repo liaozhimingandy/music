@@ -27,9 +27,9 @@ if errorlevel 1 (
 )
 
 rem 后端绑定地址由 backend\.env 的 HOST / PORT 决定（缺省 0.0.0.0:8788），
-rem 由 backend\run.py 读 settings 后启动 uvicorn。这里**不**传 --host/--port，
-rem 否则命令行参数会盖掉 .env 的配置（这正是「改了 .env 没效果」的根因）。
-rem 下面的读取仅用于回显提示；实际生效地址以后端启动日志为准。
+rem 本脚本读出后按 uvicorn 官方写法传给 --host/--port。
+rem 注意：容器内固定监听 8000（backend\Dockerfile 的 CMD），与 .env 无关。
+rem 下面的读取仅用于取值；实际生效地址以后端启动日志为准。
 if not defined ACE_STEP_UI_PORT set "ACE_STEP_UI_PORT=5175"
 if not defined FRONTEND_HOST set "FRONTEND_HOST=0.0.0.0"
 
@@ -39,7 +39,7 @@ for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /c:"HOST=" "%ROOT_DIR%
 for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /c:"PORT=" "%ROOT_DIR%\backend\.env" 2^>nul`) do set "BACKEND_PORT=%%B"
 
 echo Starting Music Studio backend on %BACKEND_HOST%:%BACKEND_PORT%
-start "Music Studio Backend" cmd /k "cd /d "%ROOT_DIR%" && uv run --project backend python backend\run.py"
+start "Music Studio Backend" cmd /k "cd /d "%ROOT_DIR%" && uv run --project backend uvicorn app.main:app --app-dir backend --host %BACKEND_HOST% --port %BACKEND_PORT%"
 
 echo Starting Music Studio frontend on %FRONTEND_HOST%:%ACE_STEP_UI_PORT%
 start "Music Studio Frontend" cmd /k "cd /d "%ROOT_DIR%\frontend" && npm run dev -- --host %FRONTEND_HOST% --port %ACE_STEP_UI_PORT%"

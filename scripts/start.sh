@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 同时启动后端（run.py）与前端（vite dev）；Ctrl+C 一起退出。
+# 同时启动后端（uvicorn）与前端（vite dev）；Ctrl+C 一起退出。
 # 首次运行前先执行 scripts/install_mac.sh（或手工 uv sync --project backend）。
 #
 # 后端绑定地址由 backend/.env 的 HOST / PORT 决定（缺省 0.0.0.0:8788），
-# 由 backend/run.py 读 settings 后启动 uvicorn。本脚本**不再**传 --host/--port，
-# 否则命令行参数会盖掉 .env 的配置（这正是「改了 .env 没效果」的根因）。
+# 本脚本读出后按 uvicorn 官方写法传给 --host/--port。
+# 注意：容器内固定监听 8000（backend/Dockerfile 的 CMD），与 .env 无关。
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 FRONTEND_PORT=${ACE_STEP_UI_PORT:-5175}
@@ -46,9 +46,10 @@ fi
 trap 'kill 0' SIGINT SIGTERM EXIT
 
 # uv run 会复用 backend/.venv，不需要手动 activate / 设 PYTHONPATH：
-# run.py 所在目录会自动进 sys.path，app 包可直接 import。
-# 绑定地址交给 run.py 从 .env 读，这里不传 --host/--port。
-uv run --project "$ROOT_DIR/backend" python "$ROOT_DIR/backend/run.py" &
+# --app-dir 已经把 backend 加进 sys.path。
+# 绑定地址取自 backend/.env 的 HOST / PORT（兼容 ACE_STEP_* 旧别名）。
+uv run --project "$ROOT_DIR/backend" \
+  uvicorn app.main:app --app-dir "$ROOT_DIR/backend" --host "$BACKEND_HOST" --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
 echo "Backend running (PID $BACKEND_PID) on $BACKEND_HOST:$BACKEND_PORT"
