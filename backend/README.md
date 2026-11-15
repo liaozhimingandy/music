@@ -137,7 +137,7 @@ docker build -t music-studio-backend ./backend
 docker run -d --name music-backend -p 8788:8788 -v music-data:/app/data \
   -e MUSIC_API_TOKEN=xxx -e LLM_API_KEY=xxx music-studio-backend
 
-# 前后端一起（推荐）：前端 nginx 反代 /v1，浏览器同源、无需 CORS
+# 只跑后端（前端走 GitHub Pages / Cloudflare 静态托管，直接调 /v1，需在 CORS_ORIGINS 放行）
 cd .. && docker compose up -d --build
 ```
 

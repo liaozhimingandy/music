@@ -89,7 +89,7 @@ uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 -
 
 ## Docker 部署（自建服务器）
 
-前后端各一个镜像：`backend`（FastAPI，数据落在 `/app/data` 卷）、`frontend`（nginx 托管 SPA 并把 `/v1` 反代给后端，**同源所以无需配 CORS**）。
+后端一个镜像：`backend`（FastAPI，数据落在 `/app/data` 卷）。前端不打包成容器——走 GitHub Pages 或 Cloudflare 等静态托管，直接调用后端 `/v1`（需在后端 `CORS_ORIGINS` 放行前端域名）。
 
 **本地一条命令试跑**：
 
@@ -222,10 +222,7 @@ backend/app/
 │   ├── Dockerfile      # 后端镜像（python:3.12-slim + uv sync --frozen，非 root，数据卷 /app/data）
 │   ├── pyproject.toml  # 依赖声明（uv 管理）
 │   └── uv.lock         # 锁定的依赖版本，镜像构建用 --frozen 保证一致
-├── frontend/           # 中文单页前端（Vue 3）
-│   ├── Dockerfile      # 前端镜像（node 构建 -> nginx 托管）
-│   ├── nginx.conf      # SPA fallback + /v1 反代 + 静态缓存
-│   └── music-studio-security.conf
+├── frontend/           # 中文单页前端（Vue 3），构建产物由 GitHub Pages 静态托管
 ├── deploy/             # 生产部署：拉镜像的 compose + .env 模板
 ├── docker-compose.yml  # 本地/源码构建版编排
 ├── docs/               # 安装指南、接口清单、Docker 部署、截图

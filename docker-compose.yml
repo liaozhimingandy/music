@@ -1,8 +1,8 @@
-# 源码构建版编排：本地开发 / 直接在有代码的机器上跑。
+# 源码构建版编排：本地开发 / 直接在有代码的机器上跑后端。
 #
 #   cp deploy/.env.example .env      # 填 LLM_API_KEY、MUSIC_API_TOKEN
 #   docker compose up -d --build
-#   open http://localhost:8088
+#   后端监听 8788；前端另走 GitHub Pages / Cloudflare，不在本编排内。
 #
 # 没配密钥想先看界面：MUSIC_STUDIO_MOCK=true docker compose up -d --build
 # （离线演示模式，LLM 与音乐生成都走桩，不联网、不花钱）
@@ -37,36 +37,16 @@ services:
       # 宿主机只关心命名卷，不关心它在哪个物理目录。
       MUSIC_STUDIO_DATA_DIR: /app/data
       MUSIC_STUDIO_PORT: "8788"
-      # nginx 反代会写 X-Forwarded-For，开启后限流/单客户端并发按真实 IP 统计。
-      # 反代不在本编排内（例如换成云 LB 直连后端）时，要确认链路会覆盖该头。
+      # 反代（Cloudflare / 宿主 Nginx / 云 LB）会写 X-Forwarded-For，开启后
+      # 限流 / 单客户端并发按真实 IP 统计。
       MUSIC_STUDIO_TRUST_PROXY: "true"
       MUSIC_STUDIO_MOCK: ${MUSIC_STUDIO_MOCK:-false}
+    ports:
+      # 本地开发直接访问；上云时改成 127.0.0.1:8788:8788 再经反代暴露。
+      - "${BACKEND_PORT:-8788}:8788"
     volumes:
       # SQLite 库 + outputs 音频 + 阶段 JSON 全在这里，删卷 = 删全部作品。
       - music-data:/app/data
-    # 只在内网暴露：宿主机不映射端口，外网只能经前端 nginx 的 /v1 访问。
-    expose:
-      - "8788"
-    logging: *default-logging
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        # 同源 /v1：浏览器只跟 nginx 说话，nginx 反代到 backend，天然无跨域。
-        VITE_APP_API_BASE_URL: ${VITE_APP_API_BASE_URL:-/v1}
-        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
-        VITE_APP_IS_DEBUG: "False"
-    image: ${LOCAL_FRONTEND_IMAGE:-music-studio/frontend:local}
-    restart: unless-stopped
-    depends_on:
-      # 等后端过了健康检查再起 nginx：否则首个请求可能拿到 502，
-      # 前端顶栏会短暂显示「后端未连接」。
-      backend:
-        condition: service_healthy
-    ports:
-      - "${WEB_PORT:-8088}:80"
     logging: *default-logging
 
 volumes:

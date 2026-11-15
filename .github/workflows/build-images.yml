@@ -32,7 +32,6 @@ on:
     branches: [main]
     paths:
       - "backend/**"
-      - "frontend/**"
       - "deploy/**"
       - "docker-compose.yml"
       - ".github/workflows/build-images.yml"
@@ -59,7 +58,7 @@ jobs:
     name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # 前端挂了也要看到后端的构建结果
+      fail-fast: false # 构建出错也要把结果暴露出来
       matrix:
         include:
           - name: backend
@@ -67,14 +66,6 @@ jobs:
             file: ./backend/Dockerfile
             # 后端镜像不接受 Vite 变量，留空（传了 buildx 会警告 unused build arg）
             build_args: ""
-          - name: frontend
-            context: ./frontend
-            file: ./frontend/Dockerfile
-            # 前端构建期配置：同源 /v1，由镜像内的 nginx 反代到 backend。
-            build_args: |
-              VITE_APP_API_BASE_URL=/v1
-              VITE_BASE_PATH=/
-              VITE_APP_IS_DEBUG=False
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -161,7 +152,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ matrix.build_args }}
-          # GHA 缓存按服务分 scope，前后端的 layer 不会互相污染。
+          # GHA 缓存按服务分 scope（目前仅 backend），不同镜像的 layer 不会互相污染。
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 

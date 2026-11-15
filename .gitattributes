@@ -10,8 +10,6 @@
 
 **/Dockerfile text eol=lf
 **/.dockerignore text eol=lf
-frontend/nginx.conf text eol=lf
-frontend/music-studio-security.conf text eol=lf
 docker-compose.yml text eol=lf
 deploy/docker-compose.yml text eol=lf
 # uv 的两份清单也固定 LF：uv.lock 由工具生成，跨平台差异会让锁文件频繁
