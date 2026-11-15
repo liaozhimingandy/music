@@ -2,10 +2,10 @@
 #
 # 用法：
 #   cd backend
-#   # .env 在外层（仓库根）时，env_file 默认就指向 ../.env，直接起即可：
+#   # .env 与 docker-compose.yml 同级（backend/）时，env_file 默认指向 ./ .env，直接起即可：
 #   docker compose up -d --build
-#   # 若 .env 在别的路径，用 ENV_FILE 指过去（仍在 backend/ 就改成 ./.env）：
-#   ENV_FILE=../.env docker compose up -d --build
+#   # 若 .env 在别的路径，用 ENV_FILE 指过去：
+#   ENV_FILE=/path/to/.env docker compose up -d --build
 #
 # 接入已有 Traefik（关键两步）：
 #   1) 本服务通过 labels 暴露给 Traefik，必须和 Traefik 在同一 Docker 网络；
@@ -35,10 +35,10 @@ services:
     # 本地构建用独立变量名，避免被意外打上远端 tag。
     image: ${LOCAL_BACKEND_IMAGE:-music-studio/backend:local}
     restart: unless-stopped
-    # 读取外层 .env（默认仓库根 ../.env；位置不同用 ENV_FILE 覆盖）。
+    # 读取同级 .env（默认当前目录 ./.env；位置不同用 ENV_FILE 覆盖）。
     # required:false 保证缺 .env 也能起（走 mock / 缺密钥状态，便于先验证镜像）。
     env_file:
-      - path: ${ENV_FILE:-../.env}
+      - path: ${ENV_FILE:-.env}
         required: false
     environment:
       # 以下为容器内固定路径 / 端口 / 代理配置，不来自 .env：
