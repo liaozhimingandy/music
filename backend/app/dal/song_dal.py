@@ -3,9 +3,10 @@
 所有 SQL 参数都走占位符绑定，字段来自 models.SONG_COLUMNS 白名单，
 因此 Service 传入的任意 kwargs 都不会拼出非预期列或注入 SQL。
 
-除基本 CRUD 外还提供给接口防护用的三个查询：
+除基本 CRUD 外还提供给接口防护用的四个查询：
 ``find_duplicate``（幂等去重）/ ``count_active``（全局并发上限）/
-``count_active_by_client``（单客户端并发上限）。
+``count_active_by_client``（单客户端并发上限）/ ``count_created_since``
+（每日生成配额）。
 
 持久化队列
 ----------
@@ -92,6 +93,23 @@ class SongDAL:
             row = await cursor.fetchone()
             await cursor.close()
         return SongRecord.from_row(row) if row else None
+
+    async def count_created_since(self, since: str) -> int:
+        """统计 ``since``（ISO 8601 UTC 字符串，含）以来创建的歌曲数量。
+
+        每日生成配额的分母：**所有**新建记录都计入，不论最终成功还是失败。
+        理由是一旦建了行，后续阶段就可能已经调用过 LLM / 音乐生成接口，
+        按「提交次数」而不是「成功数」统计才能真实反映成本。
+
+        时间列统一由 ``utc_now()`` 写入 ``+00:00`` 格式，且 ISO 字符串的
+        字典序与时间序一致（同格式、同偏移），所以这里可以直接用 ``>=``
+        比较，不需要在 SQL 里做日期解析。依赖 idx_songs_created_at 索引。
+        """
+        async with connection() as conn:
+            cursor = await conn.execute("SELECT COUNT(*) FROM songs WHERE created_at >= ?", (since,))
+            row = await cursor.fetchone()
+            await cursor.close()
+        return int(row[0]) if row else 0
 
     async def count_active(self) -> int:
         """统计全局排队中 / 生成中的任务数（防刷爆线程池与外部 API 额度）。"""

@@ -6,8 +6,8 @@
   ``GenerationResponse``（frontend/src/interface/index.ts）建模。
 * 唯一命名例外是 ``musical_key``：前端字段叫 ``key``，由 SongService 在
   出参时做 ``musical_key -> key`` 映射，避免与 SQL 关键字、Python 属性混淆。
-* ``song_stages`` 一个任务对应五行（planning / lyrics / polish / music /
-  synthesize），前端轮询时用它显示「当前进行到哪一步」。
+* ``song_stages`` 一个任务对应五行（planning / lyrics / polish /
+  music_prompt / music_generation），前端轮询时用它显示「当前进行到哪一步」。
 * 作品状态只用前端认识的 ``queued / processing / ready / failed``；阶段状态
   用 ``pending / running / completed / failed``，两套枚举见 constants.py。
 
@@ -23,9 +23,9 @@
 
 维护提示
 --------
-新增数据库字段时必须同步改四处：``SCHEMA_SQL``（新库）、
-``SONG_TABLE_MIGRATIONS``（旧库）、``SONG_COLUMNS``（DAL 字段白名单）、
-``entities.SongRecord``（实体）。漏掉白名单会静默丢数据。
+新增数据库字段时必须同步改：``SCHEMA_SQL``（新库）、对应表的
+``*_TABLE_MIGRATIONS``（旧库补列）、``SONG_COLUMNS`` / ``STAGE_COLUMNS``
+（DAL 字段白名单）、``entities`` 实体。漏掉白名单会静默丢数据。
 """
 
 from __future__ import annotations
@@ -72,14 +72,20 @@ CREATE INDEX IF NOT EXISTS idx_songs_created_at ON songs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_songs_status ON songs(status);
 
 CREATE TABLE IF NOT EXISTS song_stages (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    song_id      TEXT NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
-    stage        TEXT NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'pending',
-    output_file  TEXT,
-    error        TEXT,
-    started_at   TEXT,
-    finished_at  TEXT,
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    song_id            TEXT NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+    stage              TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'pending',
+    output_file        TEXT,
+    error              TEXT,
+    started_at         TEXT,
+    finished_at        TEXT,
+    -- 阶段遥测：记录该阶段实际使用的模型与 token 消耗，便于排查问题与核算成本。
+    model              TEXT,                       -- LLM 模型名 / 音乐生成模型 ID
+    prompt_tokens      INTEGER,                    -- 输入 token（音乐阶段为 NULL）
+    completion_tokens  INTEGER,                    -- 输出 token（音乐阶段为 NULL）
+    total_tokens       INTEGER,                    -- 上下行合计（音乐阶段为 NULL）
+    metrics_json       TEXT NOT NULL DEFAULT '{}', -- 扩展指标 JSON（elapsed_ms、远端 task_id 等）
     UNIQUE(song_id, stage)
 );
 
@@ -95,8 +101,23 @@ SONG_TABLE_MIGRATIONS: dict[str, str] = {
     "recovery_attempts": "INTEGER NOT NULL DEFAULT 0",
 }
 
+# song_stages 旧库补列映射（同 SONG_TABLE_MIGRATIONS 的机制）。
+# 阶段遥测列后加：历史阶段行为 NULL / 空 JSON，不影响任何查询。
+STAGE_TABLE_MIGRATIONS: dict[str, str] = {
+    "model": "TEXT",
+    "prompt_tokens": "INTEGER",
+    "completion_tokens": "INTEGER",
+    "total_tokens": "INTEGER",
+    "metrics_json": "TEXT NOT NULL DEFAULT '{}'",
+}
+
 # 依赖新列的索引必须在 ALTER 之后创建，否则旧库（尚无该列）会在启动时报错。
+# 阶段改名数据迁移：第四阶段曾叫 ``music``，后更名为 ``music_prompt``；
+# 旧库里的历史记录在此统一改名（UPDATE 带 WHERE 天然幂等，重复执行无副作用）。
+# 不会违反 UNIQUE(song_id, stage)：改名前不存在 music_prompt 行。
 POST_MIGRATION_SQL = """
+UPDATE song_stages SET stage = 'music_prompt' WHERE stage = 'music';
+UPDATE songs SET current_stage = 'music_prompt' WHERE current_stage = 'music';
 CREATE INDEX IF NOT EXISTS idx_songs_fingerprint ON songs(input_fingerprint, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_songs_client ON songs(client_key, status);
 CREATE INDEX IF NOT EXISTS idx_songs_queue ON songs(status, created_at ASC);
@@ -153,4 +174,10 @@ STAGE_COLUMNS: tuple[str, ...] = (
     "error",
     "started_at",
     "finished_at",
+    # --- 阶段遥测（排查问题 / 核算成本用）---
+    "model",              # 该阶段实际使用的模型（LLM 模型名 / 音乐模型 ID）
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "metrics_json",       # JSON 字符串，实体里对应 metrics: dict
 )

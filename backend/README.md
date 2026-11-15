@@ -105,28 +105,45 @@ backend/app/
 
 - **重复提交**：`SongService.create` 对请求内容算指纹（或取 `Idempotency-Key`），命中活跃任务 / 去重窗口内的已有作品时直接返回该作品（200 + `X-Deduplicated: true`），不重复计费。「查重 + 插入」用 `asyncio.Lock` 串行化；`?force=true` 可强制新建。
 - **活跃任务闸门**放在去重之后：幂等重试不会因「任务已满」被误拦，只有真新建才检查全局 / 单客户端上限。
+- **每日配额**：`MUSIC_STUDIO_DAILY_LIMIT`（默认 50 首/天，0 不限）限制「一天能新建几首」，同样在去重之后检查；计数口径是当天创建的 songs 行数（失败也算），日界按 `MUSIC_STUDIO_DAILY_RESET_UTC_OFFSET`（默认 8 = 北京时间）划分，实现见 `services/quota.py`。用完时 429 + `Retry-After`（到明日重置）+ 中文说明，未用完时响应带 `X-Daily-Remaining`。
 - **限流**：`deps.py` 的 `enforce_read_policy` / `enforce_llm_policy` / `enforce_generation_policy` 按客户端 IP 哈希做滑动窗口计数，返回 429 + `Retry-After`；`reject_oversized_body` 返回 413；Pydantic 的 `extra="forbid"` 与字段长度约束返回 422。
 - 完整规则与默认值见 [docs/api.md](../docs/api.md) 第三章。
 
 ## 安装与启动
 
+依赖用 [uv](https://docs.astral.sh/uv/) 管理（`pyproject.toml` + `uv.lock`），不再需要 pip / requirements.txt：
+
 ```bash
-# 1. 虚拟环境（Python 3.10+）
-python -m venv backend/.venv
-backend/.venv/Scripts/python.exe -m pip install -e backend       # Windows
-# backend/.venv/bin/pip install -e backend                       # macOS / Linux
+# 1. 依赖（Python 3.10+；uv 安装方式见 https://docs.astral.sh/uv/getting-started/installation/）
+uv sync --project backend                        # 建 backend/.venv，按 uv.lock 安装
 
 # 2. 配置
 cp backend/app/.env.example backend/app/.env    # 填入 LLM / ModelScope 密钥
 
 # 3. 启动（在仓库根目录执行）
-backend/.venv/Scripts/uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
+uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
 ```
 
-依赖仅 8 个：fastapi / uvicorn / pydantic / pydantic-settings / python-dotenv / httpx / Jinja2 / aiosqlite，无需 torch 或本地模型权重。
+运行时依赖仅 8 个：fastapi / uvicorn / pydantic / pydantic-settings / python-dotenv / httpx / Jinja2 / aiosqlite，无需 torch 或本地模型权重。加依赖用 `uv add --project backend <包名>`，它会同时更新 `uv.lock`（锁文件必须一起提交，镜像构建用 `uv sync --frozen` 保证一致）。
 
 交互式文档：`http://localhost:8788/docs`（文档端点不带版本号）；健康检查：`/v1/health`。
 Windows 也可用 `scripts/start.bat` 一次启动前后端。
+
+### 用 Docker 跑
+
+```bash
+# 只起后端，数据落到命名卷
+docker build -t music-studio-backend ./backend
+docker run -d --name music-backend -p 8788:8788 -v music-data:/app/data \
+  -e MUSIC_API_TOKEN=xxx -e LLM_API_KEY=xxx music-studio-backend
+
+# 前后端一起（推荐）：前端 nginx 反代 /v1，浏览器同源、无需 CORS
+cd .. && docker compose up -d --build
+```
+
+镜像要点：`python:3.12-slim`、以 uid `10001` 的非 root 用户运行、数据目录固定 `/app/data`、
+健康检查打 `/v1/health`、**只能单进程**（队列 worker 在进程内去重，`--workers` 会重复消费任务）。
+完整部署流程见 [Docker 部署指南](../docs/deployment.md)。
 
 ## 离线演示
 
@@ -138,17 +155,62 @@ MUSIC_STUDIO_MOCK=true
 
 此时 LLM 返回满足阶段校验的桩 JSON，音乐生成本地合成 8 秒 WAV，全流程约 1 秒跑完，前端播放/进度条完全可用。
 
+## 日志与调试
+
+日志由 `app/logging_setup.py` 统一用 **loguru** 收口（存量代码里的标准库
+`logging.getLogger(__name__)` 会被拦截转发进来，无需改写）。
+
+| 开关 | 默认 | 说明 |
+| --- | --- | --- |
+| `DEBUG` | `false` | `true` → DEBUG 级别；`false` → INFO 级别。同时决定异常堆栈是否带局部变量（生产别开） |
+| `MUSIC_STUDIO_LOG_FILE` | `true` | 关掉后只输出到控制台 |
+| `MUSIC_STUDIO_LOG_RETENTION_DAYS` | `7` | 日志保留天数，更早的由 loguru 自动删除 |
+| `MUSIC_STUDIO_LOG_DIR` | `<data_dir>/logs` | 日志目录 |
+
+文件按天轮转：`data/logs/music-studio-2026-11-15.log`（UTF-8，零点切分）。
+
+**INFO 级别就能看到**（排查常规问题够用）：
+
+```text
+INFO | app.logging_setup:log_startup_summary:185 - 配置生效：LLM 模型=aim-1 ｜ 音乐模型=ACE-Step/acestep-v15-xl-sft ｜ DEBUG=False ｜ 断点续跑=True ｜ 每日上限=50
+INFO | app.services.song_service:create:358 - 创建作品：01a1dcbe…（模式=simple，时长=-，配额 1/50，指纹 89acfcf4…）
+INFO | app.services.workflow_service:run:161 - 开始 MusicFlow 任务：01a1dcbe…（输入 11 字，LLM=aim-1，断点续跑=True）
+INFO | app.services.workflow_service:_execute:279 - 开始执行阶段：planning
+INFO | app.services.workflow_service:_execute:296 - 阶段完成：planning ｜ 模型=aim-1 ｜ tokens=输入 2515 / 输出 9816 / 合计 12331 ｜ 耗时=99.7s
+```
+
+**DEBUG 级别额外记录**：LLM 请求参数（模型 / 端点 / 提示词长度）、模型返回
+内容前 300 字、网关实际返回的模型与请求模型不一致的告警、用户输入摘要、
+aiosqlite 清理产物等细节。
+
+## 排障
+
+- **换了 LLM 模型但数据库里 `song_stages.model` 没变 / 是空的**：先翻日志找
+  `复用已落盘产物 …跳过执行（模型沿用上次记录的 X）`。断点续跑的设计是
+  「阶段产物 JSON 存在就跳过」，重启后接着跑的任务不会重新调用模型，所以模型
+  仍是上次那次的。想用新模型重跑就设 `MUSIC_STUDIO_RESUME=false`（产物会被覆盖，
+  LLM 与音乐额度都会重新消耗）。另外 `songs.metadata.llm_model` 记录的是本次任务
+  整体使用的模型，可用来判断某首歌到底是哪个模型产出的。
+- **`LLM_CA_CERT` 提示找不到证书**：相对路径不再按启动目录解析，而是依次尝试
+  `backend/app` → `backend` → 仓库根 → 进程 CWD，所以把 `root.crt` 放在
+  `backend/app/` 下、`.env` 里写 `root.crt` 或 `.\root.crt` 都能命中（反斜杠会
+  自动转成正斜杠，Linux 同样有效）。配置了却解析不到时，启动日志会打印
+  `LLM 请求启用自定义 CA 证书`（成功）或 `指向的证书不存在（已尝试：…）`（失败）。
+- **前端提示跨域**：先看响应状态码。500 也会被浏览器报成 CORS，用
+  `curl -i http://localhost:8788/v1/history` 确认后端本身是否正常。
+
 ## 测试
 
 ```bash
-backend/.venv/Scripts/python.exe backend/tests/smoke_test.py
+uv run --project backend python backend/tests/smoke_test.py
 ```
 
-冒烟测试用临时数据库 + mock 模式，71 项断言（启用 DELETE 路由时为 76 项）覆盖：/v1 版本前缀与 CORS、旧路径下线、建表与旧库补列、UUIDv7 单调性、三个 LLM 任务、全异步五阶段推进、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429 与空描述防护、MUSIC_MODEL 配置兜底、并发闸门顺序、500 响应的 CORS 头、音频下载、级联删除、前端字段契约，以及**重启恢复队列**（遗留任务重新入队、运行中中断后状态保留与断点续跑、恢复次数超限、failed 终态不重跑）。
+冒烟测试用临时数据库 + mock 模式，91 项断言（启用 DELETE 路由时为 96 项）覆盖：/v1 版本前缀与 CORS、旧路径下线、建表与旧库补列、UUIDv7 单调性、三个 LLM 任务、全异步五阶段推进、阶段遥测（每阶段模型 / token / 耗时落库）、幂等去重（含 `Idempotency-Key` / `force`）、413 / 422 / 429、每日生成配额与空描述防护、MUSIC_MODEL 配置兜底、并发闸门顺序、500 响应的 CORS 头、音频下载、级联删除、前端字段契约，以及**重启恢复队列**（遗留任务重新入队、运行中中断后状态保留与断点续跑、复用阶段不覆盖已记录的模型、恢复次数超限、failed 终态不重跑）。
 
 ## 数据
 
 - 数据库：`<仓库根>/data/music_studio.db`（WAL，`/data/` 已忽略）
+- 运行日志：`<仓库根>/data/logs/music-studio-YYYY-MM-DD.log`（每天一个文件，保留 7 天）
 - 阶段产物：`<仓库根>/data/outputs/<作品ID>/`（`stage1.json`、`stage2_polished.json`、`stage3.json`、`music/final_song.*`）
 - 阶段产物存在即跳过重跑；音乐生成另有参数指纹 + `task_id` 落盘，中断后可续跑或只补下载。
 - 旧库启动时自动补 `input_fingerprint` / `client_key` / `recovery_attempts` 三列与相关索引，历史数据不丢失。

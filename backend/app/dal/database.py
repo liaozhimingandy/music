@@ -36,7 +36,12 @@ from typing import AsyncIterator
 import aiosqlite
 
 from ..config import settings
-from ..models import POST_MIGRATION_SQL, SCHEMA_SQL, SONG_TABLE_MIGRATIONS
+from ..models import (
+    POST_MIGRATION_SQL,
+    SCHEMA_SQL,
+    SONG_TABLE_MIGRATIONS,
+    STAGE_TABLE_MIGRATIONS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,33 +129,37 @@ async def connection() -> AsyncIterator[aiosqlite.Connection]:
             raise
 
 
-async def _ensure_song_columns(conn: aiosqlite.Connection) -> None:
-    """旧库平滑升级：补齐后来新增的列，再建依赖这些列的索引。
+async def _ensure_table_columns(
+    conn: aiosqlite.Connection, table: str, migrations: dict[str, str]
+) -> None:
+    """通用旧库补列：检查表结构，缺哪列就 ALTER 哪列（幂等）。
 
     ``CREATE TABLE IF NOT EXISTS`` 不会修改已有表，所以必须显式 ALTER，
     否则旧 ``data/music_studio.db`` 会在 INSERT 新字段时直接报错。
     列名与类型来自 models.db_schema 的常量白名单（非用户输入），
     故可以用 f-string 拼 DDL。
     """
-    cursor = await conn.execute("PRAGMA table_info(songs)")
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
     rows = await cursor.fetchall()
     await cursor.close()
     existing = {row[1] for row in rows}
-    for column, declaration in SONG_TABLE_MIGRATIONS.items():
+    for column, declaration in migrations.items():
         if column not in existing:
-            logger.info("旧库补列：songs.%s %s", column, declaration)
-            await conn.execute(f"ALTER TABLE songs ADD COLUMN {column} {declaration}")
+            logger.info("旧库补列：%s.%s %s", table, column, declaration)
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 async def init_schema() -> None:
     """应用启动时建表 + 补列（幂等），由 main.py 的 async lifespan 调用。
 
     顺序很重要：先建表（新库一次到位），再补旧库缺失的列，最后才建依赖
-    新列的索引——否则旧库会因为「列不存在」在建索引时失败、导致启动中断。
+    新列的索引与数据迁移——否则旧库会因为「列不存在」在建索引时失败、
+    导致启动中断。
     """
     async with connection() as conn:
         await conn.executescript(SCHEMA_SQL)
-        await _ensure_song_columns(conn)
+        await _ensure_table_columns(conn, "songs", SONG_TABLE_MIGRATIONS)
+        await _ensure_table_columns(conn, "song_stages", STAGE_TABLE_MIGRATIONS)
         await conn.executescript(POST_MIGRATION_SQL)
 
 

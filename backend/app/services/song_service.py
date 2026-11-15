@@ -4,7 +4,7 @@
 把 SongRecord 映射成前端需要的 GenerationResponse。
 这是「前端契约」与「数据库实体」之间唯一的转换点，改字段优先改这里。
 
-生成接口的两道防护
+生成接口的三道防护
 ------------------
 1. **幂等去重**：对规范化后的请求内容算 sha256 指纹（或直接用客户端的
    ``Idempotency-Key``）。若同一指纹已有 queued/processing 任务，或窗口内
@@ -13,6 +13,9 @@
 2. **并发闸门**：``_create_lock`` 把「查重 + 插入」串行化，杜绝并发双击时
    两个请求同时查不到、各自插一条；deps.py 另有滑动窗口限流与全局/单客户端
    活跃任务上限。
+3. **每日配额**：``MUSIC_STUDIO_DAILY_LIMIT``（默认 50 首/天，0 表示不限）
+   限制「一天能建多少首」，是成本兜底。它排在幂等判断之后，所以幂等重试与
+   查询接口都不吃配额；只有真新建才会消耗。
 
 注意：本类不执行五阶段流程，具体编排在 WorkflowService；
 生成任务通过构造参数 ``submit_job``（async 回调）注入，单测可换成同步执行。
@@ -42,6 +45,7 @@ from ..models import (
     StageResponse,
 )
 from .cover_theme import compute_theme
+from .quota import DailyQuota, quota_window
 
 logger = logging.getLogger(__name__)
 
@@ -91,16 +95,30 @@ class TooManyActiveJobs(Exception):
     """
 
 
+class DailyQuotaExceeded(Exception):
+    """今日生成额度已用完（``MUSIC_STUDIO_DAILY_LIMIT``）；由路由转成 429。
+
+    带上 ``quota`` 快照，路由才能把重置时间写进 ``Retry-After`` 与响应头，
+    前端也能据此显示「今日剩余 0 首，明天 00:00 恢复」这类友好提示。
+    """
+
+    def __init__(self, quota: DailyQuota) -> None:
+        super().__init__(quota.message())
+        self.quota = quota
+
+
 @dataclass(frozen=True)
 class CreateResult:
-    """创建结果：响应体 + 是否命中幂等去重。
+    """创建结果：响应体 + 是否命中幂等去重 + 创建后的配额快照。
 
     路由用 ``deduplicated`` 决定是否加 ``X-Deduplicated: true`` 响应头，
-    不改动 GenerationResponse 结构，前端契约保持不变。
+    用 ``quota`` 写 ``X-Daily-Remaining`` 之类的额度头；不改动
+    GenerationResponse 结构，前端契约保持不变。
     """
 
     record: GenerationResponse
     deduplicated: bool
+    quota: DailyQuota | None = None
 
 
 class SongService:
@@ -201,6 +219,17 @@ class SongService:
                 error=item.error,
                 started_at=item.started_at,
                 finished_at=item.finished_at,
+                model=item.model,
+                usage=(
+                    {
+                        "prompt_tokens": item.prompt_tokens,
+                        "completion_tokens": item.completion_tokens,
+                        "total_tokens": item.total_tokens,
+                    }
+                    if item.total_tokens is not None
+                    else None
+                ),
+                metrics=item.metrics,
             )
             for item in stage_rows
         ]
@@ -214,6 +243,25 @@ class SongService:
         )
         return int(total), int(mine)
 
+    async def daily_quota(self) -> DailyQuota:
+        """今日配额快照（上限 / 已用 / 重置时间）。
+
+        「已用」= 今天创建的 songs 行数，包含失败记录（失败也可能已经消耗了
+        LLM 额度）。不限额时也照常统计，便于 /v1/health 展示真实用量。
+
+        日界偏移取 ``MUSIC_STUDIO_DAILY_RESET_UTC_OFFSET``（默认 8 = 东八区），
+        见 services/quota.py 的实现说明。
+        """
+        offset = float(getattr(self.config, "daily_reset_utc_offset", 8.0))
+        start, reset_at = quota_window(offset)
+        used = await self.songs.count_created_since(start.isoformat())
+        return DailyQuota(
+            limit=int(getattr(self.config, "daily_generation_limit", 0)),
+            used=used,
+            reset_at=reset_at,
+            offset_hours=offset,
+        )
+
     # ---------------- 写入 ----------------
 
     async def create(
@@ -226,9 +274,9 @@ class SongService:
     ) -> CreateResult:
         """创建作品并立即返回 ``queued``，不等待生成完成。
 
-        步骤：算指纹 -> 加锁查重 -> 生成 UUIDv7 ID -> 推导封面主题 ->
-        写 songs 表 -> 预置五阶段 -> 保存用户原始输入 -> 提交后台任务。
-        命中去重时直接返回已有记录，不重复计费。
+        步骤：算指纹 -> 加锁查重 -> 并发闸门 -> 每日配额 -> 生成 UUIDv7 ID ->
+        推导封面主题 -> 写 songs 表 -> 预置五阶段 -> 保存用户原始输入 ->
+        提交后台任务。命中去重时直接返回已有记录，不重复计费。
         ``force=True`` 跳过查重，供用户主动「再生成一次」使用。
 
         记录一旦写入 songs 表就进入持久化队列：即使随后进程重启，
@@ -236,6 +284,10 @@ class SongService:
 
         提交失败时不抛异常给前端，而是把作品置为 failed 并附错误信息，
         保证「点了生成却查不到记录」的情况不会出现。
+
+        超额时抛 ``DailyQuotaExceeded``（每日上限）或 ``TooManyActiveJobs``
+        （并发上限），两者都由路由层转成 429 + ``Retry-After``：
+        前者是真拒绝（明天才恢复），后者是「稍后再试」，语义不同。
         """
         fingerprint = request_fingerprint(payload, idempotency_key)
 
@@ -249,7 +301,9 @@ class SongService:
                 existing = await self.songs.find_duplicate(fingerprint, since)
                 if existing is not None:
                     logger.info("重复提交命中已有作品：%s（指纹 %s…）", existing.id, fingerprint[:8])
-                    return CreateResult(await self.to_response(existing), True)
+                    # 命中复用也回带额度快照：前端刷新后仍能显示剩余量，
+                    # 且这条路径不消耗配额（used 已经在库里了，不再 +1）。
+                    return CreateResult(await self.to_response(existing), True, await self.daily_quota())
 
             # 并发闸门必须放在幂等判断之后：命中去重的重试不会新增任务，
             # 不该因为「当前任务已满」被误拦。只有真正要新建时才检查。
@@ -263,6 +317,16 @@ class SongService:
                     raise TooManyActiveJobs(
                         f"当前客户端排队任务过多（上限 {self.config.max_active_jobs_per_client}）"
                     )
+
+            # 每日配额：同样放在幂等判断之后（不限额时 exhausted 恒为 False）。
+            # 未超额时把「即将被这条新记录占掉一格」算进去，响应头才能给出
+            # 正确的剩余量；真正写库前 quota.exhausted 已经查过了。
+            quota = await self.daily_quota()
+            if quota.exhausted:
+                logger.warning(
+                    "每日生成配额已用完：%s/%s（重置于 %s）", quota.used, quota.limit, quota.reset_hint
+                )
+                raise DailyQuotaExceeded(quota)
 
             song_id = new_song_id()  # UUIDv7：时间有序，利于主键索引与作品排序
             prompt = (payload.inputs.prompt or "").strip()
@@ -291,6 +355,16 @@ class SongService:
             await self.stages.initialize(song_id)
             store = ArtifactStore(Path(self.config.outputs_dir) / song_id)
             await store.save_text(prompt, USER_INPUT_FILE)
+            logger.info(
+                "创建作品：%s（模式=%s，时长=%s，配额 %s/%s，指纹 %s…）",
+                song_id,
+                record.mode,
+                record.duration_seconds or "-",
+                quota.used + 1,
+                quota.limit or "不限",
+                fingerprint[:8],
+            )
+            logger.debug("用户输入（前 300 字）：%s", prompt[:300].replace("\n", " "))
 
             try:
                 await self.submit_job(song_id)
@@ -299,7 +373,14 @@ class SongService:
                 await self.songs.update(song_id, status=STATUS_FAILED, error_message=f"任务提交失败：{exc}")
                 record.status = STATUS_FAILED
                 record.error_message = f"任务提交失败：{exc}"
-            return CreateResult(await self.to_response(record), False)
+            # 响应头里的额度按「本次创建之后」算：没超限时 remaining 已经是减过 1 的值
+            quota_after = DailyQuota(
+                limit=quota.limit,
+                used=quota.used + 1,
+                reset_at=quota.reset_at,
+                offset_hours=quota.offset_hours,
+            )
+            return CreateResult(await self.to_response(record), False, quota_after)
 
     async def delete(self, song_id: str) -> bool:
         """删除作品：先清输出目录，再删数据库记录（阶段记录靠外键级联）。

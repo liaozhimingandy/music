@@ -89,7 +89,13 @@ class GenerationCreate(StrictRequestModel):
 
 
 class StageResponse(BaseModel):
-    """单个阶段的进度，用于 GET /v1/generations/{id}/stages 与详情响应。"""
+    """单个阶段的进度，用于 GET /v1/generations/{id}/stages 与详情响应。
+
+    遥测字段（``model`` / ``usage`` / ``metrics``）在阶段完成时由后台流程
+    写入：``usage`` 为 OpenAI 风格 token 用量（音乐阶段与 mock 客户端为
+    None）；``metrics`` 至少含 ``elapsed_ms``，其余键随阶段不同（如远端
+    task_id），排查问题直接看这两个字段即可。
+    """
 
     stage: str
     label: str                        # 中文展示名，来自 constants.STAGE_LABELS
@@ -98,13 +104,17 @@ class StageResponse(BaseModel):
     error: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    # --- 阶段遥测 ---
+    model: str | None = None
+    usage: dict[str, Any] | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class GenerationResponse(BaseModel):
     """GET /v1/history、POST /v1/generations 的作品结构（前端强依赖）。
 
     ``key`` 对应数据库列 ``musical_key``；``audio_url`` 为相对路径，前端
-    直接拼到 <audio src> 上，离线演示模式下由 Vite 代理到后端。
+    直接拼到 <audio src> 上，开发环境由 Vite 代理到后端。
     """
 
     id: str
@@ -161,11 +171,15 @@ class LLMTaskResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """GET /v1/health 响应体；前端据此显示「后端已连接 / 演示模式」。
+    """GET /v1/health 响应体；前端据此显示「后端已连接 / 后端未连接」。
 
     ``music_model`` 是当前实际生效的音乐模型 ID（来自 MUSIC_MODEL 配置），
     也是 ``GenerationCreate.model_variant`` 唯一合法的取值来源——前端想查
     「有哪些模型」读这里即可，不必自己维护一份枚举。
+
+    ``daily_*`` 是每日生成配额快照（见 services/quota.py）：``daily_limit``
+    为 0 表示不限额，此时 ``daily_remaining`` 返回 None；前端只在它是数字时
+    显示「今日还剩 X 首」。
     """
 
     status: str
@@ -173,3 +187,7 @@ class HealthResponse(BaseModel):
     mock_mode: bool
     database: str
     music_model: str | None = None
+    daily_limit: int | None = None
+    daily_used: int | None = None
+    daily_remaining: int | None = None
+    daily_reset_at: str | None = None

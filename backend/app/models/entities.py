@@ -89,7 +89,11 @@ class SongRecord:
 
 @dataclass
 class StageRecord:
-    """某一首歌某个阶段的执行记录；``output_file`` 存在即可视为产物已落盘。"""
+    """某一首歌某个阶段的执行记录；``output_file`` 存在即可视为产物已落盘。
+
+    遥测字段（``model`` / token 三列 / ``metrics``）由 WorkflowService 在
+    阶段完成时写入，供排查问题与核算成本；mock 模式下 usage 为 None。
+    """
 
     song_id: str
     stage: str
@@ -98,9 +102,19 @@ class StageRecord:
     error: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    # --- 阶段遥测 ---
+    model: str | None = None              # 该阶段实际使用的模型
+    prompt_tokens: int | None = None      # 输入 token；音乐阶段 / mock 为 None
+    completion_tokens: int | None = None  # 输出 token
+    total_tokens: int | None = None       # 合计 token
+    metrics: dict[str, Any] = field(default_factory=dict)  # elapsed_ms 等扩展指标
     id: int | None = None  # 自增主键，仅用于按插入顺序排序展示
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "StageRecord":
-        """字段同名，直接展开即可；列清单见 models/db_schema.STAGE_COLUMNS。"""
-        return cls(**dict(row))
+        """还原实体：metrics_json -> dict；老库缺遥测列时按空值兜底。"""
+        raw = dict(row)
+        raw["metrics"] = json.loads(raw.pop("metrics_json", None) or "{}")
+        for key in ("model", "prompt_tokens", "completion_tokens", "total_tokens"):
+            raw.setdefault(key, None)
+        return cls(**raw)

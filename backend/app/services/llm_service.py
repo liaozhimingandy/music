@@ -96,12 +96,15 @@ class LLMService:
                 metadata={"mode": "offline"},
             )
 
+        # chat 返回 LLMReply；这里的辅助任务不落库遥测，只用正文
         output = strip_code_fence(
-            await self.llm.chat(
-                SYSTEM_PROMPTS[payload.task],
-                payload.seed_prompt,
-                temperature=TEMPERATURES[payload.task],
-            )
+            (
+                await self.llm.chat(
+                    SYSTEM_PROMPTS[payload.task],
+                    payload.seed_prompt,
+                    temperature=TEMPERATURES[payload.task],
+                )
+            ).content,
         ).strip().strip('"“”')
         if payload.task == "lyrics" and payload.instrumental:
             # 纯音乐时即便模型返回了歌词也不采用，保持与五阶段流程一致。

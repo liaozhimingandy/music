@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -30,8 +31,8 @@ from ..constants import (
     STATUS_PROCESSING,
     STATUS_READY,
     STAGE_LYRICS,
-    STAGE_MUSIC,
     STAGE_MUSIC_GENERATION,
+    STAGE_MUSIC_PROMPT,
     STAGE_OUTPUTS,
     STAGE_PLANNING,
     STAGE_POLISH,
@@ -43,6 +44,7 @@ from .music_provider import build_music_provider
 from .prompt_manager import PromptManager
 from .stage_steps import (
     StageContext,
+    StageTelemetry,
     flatten_lyrics,
     run_final_music,
     run_lyrics,
@@ -52,6 +54,20 @@ from .stage_steps import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _format_usage(usage: dict[str, int] | None) -> str:
+    """把 OpenAI 风格 usage 压成一行，供阶段完成日志直接打印。
+
+    没有用量时返回「（无）」（音乐阶段与 mock 客户端都没有 token 概念）。
+    """
+    if not usage:
+        return "（无）"
+    return "输入 {prompt_tokens} / 输出 {completion_tokens} / 合计 {total_tokens}".format(
+        prompt_tokens=usage.get("prompt_tokens", "-"),
+        completion_tokens=usage.get("completion_tokens", "-"),
+        total_tokens=usage.get("total_tokens", "-"),
+    )
 
 
 def _extract_bpm(stage1: dict[str, Any]) -> int | None:
@@ -137,7 +153,18 @@ class WorkflowService:
             config=self.config,
             initial_title=song.title or "",
         )
-        logger.info("开始 MusicFlow 任务：%s（输入 %s 字）", song_id, len(user_input))
+        # 本次任务实际使用的 LLM 模型写进 metadata：song_stages.model 记的是
+        # 「每个阶段那次调用返回的模型」，这里记「这次任务整体用的哪个」，
+        # 换模型后一眼能看出某首歌是哪个模型产出的（阶段复用时不覆盖）。
+        llm_model = getattr(self.llm, "model", None) or getattr(self.config, "llm_model", None)
+        await self.songs.update(song_id, metadata={**(song.metadata or {}), "llm_model": llm_model})
+        logger.info(
+            "开始 MusicFlow 任务：%s（输入 %s 字，LLM=%s，断点续跑=%s）",
+            song_id,
+            len(user_input),
+            llm_model,
+            bool(getattr(self.config, "resume_enabled", True)),
+        )
         await self.songs.update(
             song_id, status=STATUS_PROCESSING, current_stage=STAGE_PLANNING, error_message=None
         )
@@ -155,7 +182,7 @@ class WorkflowService:
             )
             polished = await self._execute(
                 ctx, song_id, STAGE_POLISH,
-                lambda: run_polish(ctx, stage1, stage2), STAGE_MUSIC,
+                lambda: run_polish(ctx, stage1, stage2), STAGE_MUSIC_PROMPT,
             )
 
             # 润色结果为准，覆盖前端提交的初始标题 / 歌词。
@@ -168,13 +195,14 @@ class WorkflowService:
 
             # --- 阶段 4：音乐制作方案，回填展示字段 ---
             plan = await self._execute(
-                ctx, song_id, STAGE_MUSIC,
+                ctx, song_id, STAGE_MUSIC_PROMPT,
                 lambda: run_music_prompt(ctx, stage1, polished), STAGE_MUSIC_GENERATION,
             )
             analysis = plan.get("music_analysis") or {}
             metadata = {
                 **song.metadata,
                 "source": "musicflow",
+                "llm_model": llm_model,
                 "target_model": plan.get("target_model", self.config.music_model),
                 "genre": analysis.get("genre") or [],
                 "mood": analysis.get("mood") or [],
@@ -213,22 +241,35 @@ class WorkflowService:
         ctx: StageContext,
         song_id: str,
         stage: str,
-        func: Callable[[], Awaitable[dict[str, Any]]],
+        func: Callable[[], Awaitable[tuple[dict[str, Any], StageTelemetry]]],
         next_stage: str | None,
     ) -> dict[str, Any]:
-        """执行单个阶段，并负责断点续跑、进度落盘与异常标记。
+        """执行单个阶段，并负责断点续跑、进度落盘、遥测记录与异常标记。
 
         流程：产物已存在且可解析 -> 直接复用；否则标记 running -> ``await``
-        阶段函数 -> 原子写产物 -> 标记 completed -> 推进 current_stage。
-        任一异常先标记该阶段 failed 再抛出，由 ``run`` 统一置作品 failed。
+        阶段函数 -> 原子写产物 -> 标记 completed（带 model / token / metrics）
+        -> 推进 current_stage。耗时统一在这里用 ``time.monotonic`` 计量，
+        与阶段返回的 metrics 合并成 ``elapsed_ms`` 写入遥测列。
+        任一异常先标记该阶段 failed（也记录耗时）再抛出，由 ``run`` 统一置
+        作品 failed。
         """
         output = STAGE_OUTPUTS[stage]
-        if await ctx.store.exists(output):
+        # MUSIC_STUDIO_RESUME=false 时忽略已有产物，强制按当前配置重跑
+        # （换了 LLM 模型想听新效果、或产物写了一半看起来正常但内容不对）。
+        if getattr(self.config, "resume_enabled", True) and await ctx.store.exists(output):
             try:
                 cached = await ctx.store.load_json(output)
                 if isinstance(cached, dict):
-                    logger.info("阶段已完成，跳过：%s", stage)
-                    await self.stages.complete(song_id, stage)
+                    # 复用旧产物：调用 reuse 而不是 complete，避免把上次记录的
+                    # 模型 / token 覆盖成本次运行的空值（详见 StageDAL.reuse）。
+                    previous_model = await self.stages.reuse(song_id, stage)
+                    logger.warning(
+                        "阶段 %s 复用已落盘产物 %s，跳过执行（模型沿用上次记录的 %s）",
+                        stage,
+                        output,
+                        previous_model or "（空）",
+                    )
+                    logger.debug("复用产物内容大小：%s -> %d 个顶层键", output, len(cached))
                     await self._advance(song_id, next_stage)
                     return cached
             except (ValueError, OSError, json.JSONDecodeError):
@@ -238,15 +279,33 @@ class WorkflowService:
         logger.info("开始执行阶段：%s", stage)
         await self.stages.start(song_id, stage)
         await self._advance(song_id, stage)
+        started = time.monotonic()
         try:
-            result = await func()
+            result, telemetry = await func()
+            elapsed_ms = round((time.monotonic() - started) * 1000)
             await ctx.store.save_json(result, output)
-            await self.stages.complete(song_id, stage)
+            await self.stages.complete(
+                song_id,
+                stage,
+                model=telemetry.model,
+                usage=telemetry.usage,
+                metrics={**telemetry.metrics, "elapsed_ms": elapsed_ms},
+            )
+            # 打完这一行，日志里就能直接对上「哪个阶段用了哪个模型、多少 token」，
+            # 不用再翻数据库——这正是此前排查「模型没记录」时缺的信息。
+            logger.info(
+                "阶段完成：%s ｜ 模型=%s ｜ tokens=%s ｜ 耗时=%.1fs",
+                stage,
+                telemetry.model or "（未返回模型名）",
+                _format_usage(telemetry.usage),
+                elapsed_ms / 1000,
+            )
             await self._advance(song_id, next_stage)
             return result
         except Exception as exc:  # noqa: BLE001
-            await self.stages.fail(song_id, stage, str(exc))
-            logger.error("阶段执行失败：%s，原因：%s", stage, exc)
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            await self.stages.fail(song_id, stage, str(exc), metrics={"elapsed_ms": elapsed_ms})
+            logger.error("阶段执行失败：%s，耗时 %.1fs，原因：%s", stage, elapsed_ms / 1000, exc)
             raise
 
     async def _advance(self, song_id: str, stage: str | None) -> None:

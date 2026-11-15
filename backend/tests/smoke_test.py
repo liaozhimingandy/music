@@ -2,8 +2,9 @@
 
 运行：``backend/.venv/Scripts/python.exe backend/tests/smoke_test.py``
 覆盖：建表与旧库补列 → UUIDv7 → /v1 版本前缀 → 全异步五阶段 → 幂等去重
-→ 接口防护（413 / 422 / 429，含空描述）→ 模型配置兜底 → 音频 → 级联删除
-→ 重启恢复持久化队列（含运行中中断的断点续跑 / 次数超限 / failed 终态）。
+→ 接口防护（413 / 422 / 429，含空描述）→ 每日生成配额 → 模型配置兜底
+→ 音频 → 级联删除 → 重启恢复持久化队列（含运行中中断的断点续跑 /
+次数超限 / failed 终态）→ 续跑复用阶段不覆盖已记录的模型。
 
 实现要点：环境变量必须在 ``import app`` **之前**设置，因为 Settings 在模块
 导入时就实例化；数据目录指向 tests/.tmp（已被 .gitignore 忽略），每次运行
@@ -50,7 +51,7 @@ from app.constants import STAGE_ORDER, STAGE_OUTPUTS, USER_INPUT_FILE  # noqa: E
 from app.dal import utc_now  # noqa: E402
 from app.ids import is_song_id, new_song_id, uuid7  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import SONG_TABLE_MIGRATIONS  # noqa: E402
+from app.models import SONG_TABLE_MIGRATIONS, STAGE_TABLE_MIGRATIONS  # noqa: E402
 from app.services.runtime import get_song_service  # noqa: E402
 
 # 前端 interface/index.ts 里 GenerationResponse 的字段白名单；
@@ -112,6 +113,11 @@ def main() -> None:
         check(health.json()["app"] == "Music Studio", "应用名为 Music Studio")
         check(health.json()["mock_mode"] is True, "离线 mock 模式已生效")
         check(health.json()["music_model"] == settings.music_model, "GET /v1/health 暴露当前 MUSIC_MODEL")
+        check(
+            health.json()["daily_limit"] == settings.daily_generation_limit
+            and isinstance(health.json()["daily_remaining"], int),
+            "GET /v1/health 暴露每日配额与剩余量",
+        )
         preflight = client.options(
             "/v1/history",
             headers={
@@ -133,19 +139,34 @@ def main() -> None:
         with sqlite3.connect(str(settings.db_path)) as conn:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             columns = {row[1] for row in conn.execute("PRAGMA table_info(songs)")}
+            stage_columns = {row[1] for row in conn.execute("PRAGMA table_info(song_stages)")}
         check({"songs", "song_stages"} <= tables, "SQLite 建出 songs / song_stages 两张表")
         check(
             {"input_fingerprint", "client_key", "recovery_attempts"} <= columns,
             "去重 / 限流 / 队列恢复计数字段已建（含旧库补列逻辑）",
         )
+        check(
+            {"model", "prompt_tokens", "completion_tokens", "total_tokens", "metrics_json"} <= stage_columns,
+            "song_stages 阶段遥测字段已建（含旧库补列逻辑）",
+        )
         with sqlite3.connect(":memory:") as migration_db:
             migration_db.execute("CREATE TABLE songs (id TEXT PRIMARY KEY, created_at TEXT)")
             for column, declaration in SONG_TABLE_MIGRATIONS.items():
                 migration_db.execute(f"ALTER TABLE songs ADD COLUMN {column} {declaration}")
+            migration_db.execute(
+                "CREATE TABLE song_stages (id INTEGER PRIMARY KEY, song_id TEXT, stage TEXT)"
+            )
+            for column, declaration in STAGE_TABLE_MIGRATIONS.items():
+                migration_db.execute(f"ALTER TABLE song_stages ADD COLUMN {column} {declaration}")
             migrated = {row[1] for row in migration_db.execute("PRAGMA table_info(songs)")}
+            migrated_stages = {row[1] for row in migration_db.execute("PRAGMA table_info(song_stages)")}
         check(
             {"input_fingerprint", "client_key", "recovery_attempts"} <= migrated,
             "旧库补列 DDL 可执行（含 NOT NULL DEFAULT 0 的恢复计数列）",
+        )
+        check(
+            {"model", "prompt_tokens", "completion_tokens", "total_tokens", "metrics_json"} <= migrated_stages,
+            "旧 song_stages 补遥测列 DDL 可执行",
         )
 
         # --- 2. UUIDv7 ---
@@ -209,6 +230,18 @@ def main() -> None:
             check(detail.get("status") == "ready", f"作品 {item_id[:8]}… 最终 ready（{detail.get('error_message')}）")
             stages = detail.get("stages", [])
             check(len(stages) == 5 and all(s["status"] == "completed" for s in stages), "五个阶段全部 completed")
+            # --- 阶段遥测：模型 / token / 扩展指标 ---
+            check(
+                all(s["model"] for s in stages) and all("elapsed_ms" in s["metrics"] for s in stages),
+                "每个阶段都记录了使用模型与耗时（elapsed_ms）",
+            )
+            planning = next(s for s in stages if s["stage"] == "planning")
+            music = next(s for s in stages if s["stage"] == "music_generation")
+            check(planning["model"] == "mock-llm" and planning["usage"] is None, "LLM 阶段记录模型名，mock 无 token 用量")
+            check(
+                music["model"] == "mock-music" and bool(music["metrics"].get("provider_task_id")),
+                "音乐阶段记录音乐模型与远端任务号",
+            )
         detail = client.get(f"/v1/generations/{song_id}").json()
         check(bool(detail["title"]) and bool(detail["lyrics"]) and bool(detail["style_prompt"]), "标题 / 歌词 / 风格提示词已回填")
 
@@ -265,6 +298,23 @@ def main() -> None:
         fresh["inputs"] = {**PAYLOAD["inputs"], "prompt": "闸门检查用的全新描述"}
         check(client.post("/v1/generations", json=fresh).status_code == 429, "真新建请求被活跃任务闸门拒绝")
         settings.max_active_jobs_per_client = 20
+        # 每日配额：把上限压到 1（今天已建过多首）后，全新请求应被拒绝，
+        # 且 detail 是给用户看的友好中文；幂等重试仍要放行（不消耗配额）。
+        settings.daily_generation_limit = 1
+        quota_hit = client.post(
+            "/v1/generations",
+            json={**PAYLOAD, "inputs": {**PAYLOAD["inputs"], "prompt": "每日配额检查用的全新描述"}},
+        )
+        check(quota_hit.status_code == 429, "每日配额用完时创建接口返回 429")
+        check("今日生成额度已用完" in quota_hit.json()["detail"], "配额拒绝提示为友好中文说明")
+        check("Retry-After" in quota_hit.headers, "配额拒绝带 Retry-After（指向明日重置）")
+        check(quota_hit.headers.get("X-Daily-Remaining") == "0", "配额拒绝带 X-Daily-Remaining: 0")
+        check(client.post("/v1/generations", json=PAYLOAD).status_code == 200, "额度用完不影响幂等重试")
+        settings.daily_generation_limit = 50
+        check(
+            client.post("/v1/generations", json=PAYLOAD).headers.get("X-Daily-Remaining") is not None,
+            "正常创建响应带剩余额度头（X-Daily-Remaining）",
+        )
 
         # --- 9. 删除：验证级联清理 ---
         # 若维护者临时把 @router.delete 注释掉（调试时常见），这里跳过而不是
@@ -387,13 +437,13 @@ def main() -> None:
         slow_id = response.json()["id"]
         task_dir = settings.outputs_dir / slow_id
         deadline = time.monotonic() + 20
-        while not (task_dir / STAGE_OUTPUTS["music"]).is_file():
+        while not (task_dir / STAGE_OUTPUTS["music_prompt"]).is_file():
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.1)
         check(
             (task_dir / STAGE_OUTPUTS["planning"]).is_file()
-            and (task_dir / STAGE_OUTPUTS["music"]).is_file(),
+            and (task_dir / STAGE_OUTPUTS["music_prompt"]).is_file(),
             "中断前前四阶段产物已落盘，卡在第五阶段",
         )
         with sqlite3.connect(str(settings.db_path)) as conn:
@@ -424,6 +474,15 @@ def main() -> None:
             before_started is not None and after_started == before_started,
             "已落盘的前四阶段未重复执行（阶段开始时间未刷新）",
         )
+        # 复用的阶段不能把上次记录的模型抹成 NULL：这正是「换了模型但数据库
+        # 没记录」的成因（早期实现调用 complete() 无条件写 model=None）。
+        with sqlite3.connect(str(settings.db_path)) as conn:
+            reused_model, reused_metrics = conn.execute(
+                "SELECT model, metrics_json FROM song_stages WHERE song_id = ? AND stage = 'planning'",
+                (slow_id,),
+            ).fetchone()
+        check(reused_model == "mock-llm", "复用阶段保留上次记录的模型（不被清成 NULL）")
+        check('"reused": true' in (reused_metrics or ""), "复用阶段在 metrics 里标记 reused，可与「真跑」区分")
 
     print("\n全部通过：全异步链路 + 依赖注入 + UUIDv7 + 幂等去重 + 接口防护 + /v1 与跨域 + 重启可恢复队列。")
 

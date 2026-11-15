@@ -20,6 +20,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from ..config import settings
+from ..constants import STAGE_PROMPT_DIRS
 
 
 class PromptManager:
@@ -67,13 +68,18 @@ class PromptManager:
     async def get_stage(self, stage: str, **variables: object) -> dict[str, str]:
         """返回某个阶段的 system / user 两条 prompt。
 
+        阶段名先经 ``STAGE_PROMPT_DIRS`` 映射成 prompts/ 子目录名
+        （如 ``music_prompt`` 阶段仍读 ``prompts/music/``，提示词目录
+        不能改名），同名阶段则直接使用阶段名。
+
         Returns:
             ``{"system_prompt": ..., "user_prompt": ...}``，键名与
             LLMClient.chat 的调用约定一致。
 
         两条模板互不依赖，用 ``asyncio.gather`` 并发读取，省一次串行等待。
         """
-        system_task = self.load(f"{stage}/system.md")
-        user_task = self.render(f"{stage}/user.md", **variables)
+        prompt_dir = STAGE_PROMPT_DIRS.get(stage, stage)
+        system_task = self.load(f"{prompt_dir}/system.md")
+        user_task = self.render(f"{prompt_dir}/user.md", **variables)
         system_prompt, user_prompt = await asyncio.gather(system_task, user_task)
         return {"system_prompt": system_prompt, "user_prompt": user_prompt}

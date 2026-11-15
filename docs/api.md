@@ -23,7 +23,7 @@
 
 | # | 方法 | 路径 | 前端是否调用 | 说明 |
 | --- | --- | --- | --- | --- |
-| 1 | GET | `/v1/health` | 否 | 健康检查，返回应用名、运行模式、数据库路径与当前 `music_model`（不限流） |
+| 1 | GET | `/v1/health` | 是（配额） | 健康检查：应用名、运行模式、数据库路径、当前 `music_model`，以及今日生成配额 `daily_limit` / `daily_used` / `daily_remaining` / `daily_reset_at`（不限流） |
 | 2 | GET | `/v1/history?limit=25` | 是 | 作品列表，前端每 2 秒轮询；也是后端在线探测依据 |
 | 3 | POST | `/v1/llm` | 仅辅助按钮 | 描述扩写 / 写词 / 起标题；**「开始生成」主链路不调用它**，后端五阶段已包含这些 LLM 步骤 |
 | 4 | POST | `/v1/generations` | 是 | 创建作品，**立即返回 `queued`**，任务落入 SQLite 持久化队列，后台跑五阶段（重启可恢复） |
@@ -32,7 +32,7 @@
 | 7 | GET | `/v1/generations/{id}/audio` | 是（`audio_url`） | 音频二进制流 |
 | 8 | DELETE | `/v1/generations/{id}` | 是 | 删除作品、音频文件与阶段产物 |
 
-> 后端未启动时前端自动进入**演示模式**（`services/demo.ts` 内存数据），界面与生成流程仍可预览。
+> 前端只对接真实后端，没有本地演示数据兜底；后端未启动时页面状态栏提示「后端未连接」。
 
 ## 二、生成任务的异步模型（持久化队列）
 
@@ -93,6 +93,17 @@ X-Deduplicated: true
 
 需要强制重新生成时加查询参数 `?force=true`。前端契约无需改动；`StudioPage.vue` 会把 413/422/429 的 `detail` 直接展示给用户。
 
+#### 每日生成配额
+
+每次生成都会真实消耗 LLM 与音乐生成额度，所以后端有一个**按自然日**的总额度兜底（`MUSIC_STUDIO_DAILY_LIMIT`，默认 50 首/天，`0` 表示不限制）：
+
+- **计数口径**：当天创建的 `songs` 行数，排队/生成中/成功/失败都算（失败前可能已经调用过 LLM）；幂等重试命中已有作品不建新行，因此不吃配额。
+- **日界**：按 `MUSIC_STUDIO_DAILY_RESET_UTC_OFFSET`（默认 `8`，即北京时间 00:00）划分，服务器跑 UTC 也不会错位。
+- **检查位置**：`SongService.create` 内、幂等去重之后——重试与查询永远不会被额度拦掉。
+- **命中时**：`429` + `Retry-After`（到明日重置的秒数）+ 中文说明，例如
+  `今日生成额度已用完（每天最多 50 首），11-16 00:00 自动重置。可以继续试听作品库里的作品，或明天再来；部署者可用 MUSIC_STUDIO_DAILY_LIMIT 调整上限。`
+- **未命中时**：创建响应带额度头 `X-Daily-Limit` / `X-Daily-Remaining` / `X-Daily-Reset`（已在 CORS 里 `expose_headers`，前端跨域也能读到），创作面板据此显示「今日还剩 N 首」，额度为 0 时按钮直接禁用并说明原因。
+
 ### 3.2 恶意 / 高频调用防护
 
 | 防护 | 默认值 | 命中结果 |
@@ -102,6 +113,7 @@ X-Deduplicated: true
 | `POST /v1/generations` 限流（消耗生成额度） | 5 次 / 60s | `429` + `Retry-After` |
 | 全局活跃任务上限 | 4 | `429`（真新建时） |
 | 单客户端活跃任务上限 | 2 | `429`（真新建时） |
+| 每日生成配额（自然日，默认东八区） | 50 首/天 | `429` + `Retry-After`（到明日重置）+ `X-Daily-Remaining: 0` |
 | 请求体大小（Content-Length） | 64 KiB | `413` |
 | 请求体字段约束 | `inputs.prompt` 非空且 ≤ 500、`lyrics ≤ 8000`、`title ≤ 100`、`seed_prompt ≤ 1000`、`metadata ≤ 4096 字符`、`extra=forbid` | `422` |
 | `limit` 查询参数 | `1 ~ 100` | `422` |
@@ -122,7 +134,7 @@ X-Deduplicated: true
 | `404` | 作品 / 音频不存在 | `{"detail": "作品不存在"}` |
 | `413` | 请求体过大 | `{"detail": "请求体过大（上限 65536 字节）"}` |
 | `422` | 参数校验失败（Pydantic / Query / Path） | `{"detail": [...]}` |
-| `429` | 限流或活跃任务超限 | `{"detail": "生成任务已达全局上限（4），请等待现有任务完成"}` |
+| `429` | 限流、活跃任务超限或今日额度用完 | `{"detail": "生成任务已达全局上限（4），请等待现有任务完成"}` / `{"detail": "今日生成额度已用完（每天最多 50 首），11-16 00:00 自动重置。…"}` |
 | `500` | 服务端内部错误 | `{"detail": "服务器内部错误，请查看后端日志"}` |
 | `502` | 上游 LLM 调用失败 | `{"detail": "LLM 调用失败：…"}` |
 
@@ -204,7 +216,15 @@ X-Deduplicated: true
 | `created_at` / `updated_at` | string | ISO 8601 UTC |
 | `current_stage` / `style_prompt` | string? | 附加字段，前端可忽略 |
 
-`GET /v1/generations/{id}` 额外返回 `stages: [{ stage, label, status, output_file, error, started_at, finished_at }]`。
+`GET /v1/generations/{id}` 额外返回 `stages: [{ stage, label, status, output_file, error, started_at, finished_at, model, usage, metrics }]`。
+
+阶段遥测字段说明（排查问题直接看后三个）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `model` | 该阶段实际使用的模型：阶段 1~4 是 LLM 模型名，阶段 5 是音乐生成模型 ID |
+| `usage` | OpenAI 风格 token 用量 `{prompt_tokens, completion_tokens, total_tokens}`；阶段 5（音乐生成）与 mock 客户端为 `null` |
+| `metrics` | 扩展指标，至少含 `elapsed_ms`（该阶段耗时）；阶段 5 另有 `provider_task_id`（远端任务号，可拿去 ModelScope 后台查证）与 `duration_seconds` |
 
 ## 五、数据模型（SQLite3）
 
@@ -233,7 +253,7 @@ X-Deduplicated: true
 >
 > **连接模型**：进程内复用一条 `aiosqlite` 长连接 + `asyncio.Lock` 事务锁。WAL 只在启动时设置一次；曾因「每操作一连接 + 每次重设 WAL」在 Windows 并发下触发 `attempt to write a readonly database`，详见 `dal/database.py` 的模块说明。
 
-**song_stages**：`id` / `song_id`（外键级联删除）/ `stage` / `status` / `output_file` / `error` / `started_at` / `finished_at`，`(song_id, stage)` 唯一。
+**song_stages**：`id` / `song_id`（外键级联删除）/ `stage` / `status` / `output_file` / `error` / `started_at` / `finished_at`，加阶段遥测列 `model` / `prompt_tokens` / `completion_tokens` / `total_tokens` / `metrics_json`，`(song_id, stage)` 唯一。
 
 ## 六、五阶段流程与提示词
 
@@ -242,7 +262,7 @@ X-Deduplicated: true
 | `planning` | `prompts/planning/` | `stage1.json` | `stage=PLANNING`、有 `creation_spec` |
 | `lyrics` | `prompts/lyrics/` | `stage2.json` | `stage=LYRICS`、`song.lyrics` 非空 |
 | `polish` | `prompts/polish/` | `stage2_polished.json` | 润色后 `song.title` / `song.lyrics` 非空 |
-| `music` | `prompts/music/` | `stage3.json` | `target_model` 与配置一致、标题未被改动 |
+| `music_prompt` | `prompts/music/`（目录沿用旧名，提示词不能改名） | `stage3.json` | `target_model` 与配置一致、标题未被改动 |
 | `music_generation` | — | `music_result.json` + 音频 | ModelScope 轮询成功并下载完成 |
 
 产物落在 `data/outputs/<id>/`；存在即跳过重跑（断点续跑）。音乐生成另用参数指纹（model + prompt + lyrics + duration 的 SHA256）避免重复提交，任务记录 `music/music_task.json` 保存 `task_id`，超时后可继续轮询。
@@ -273,6 +293,8 @@ X-Deduplicated: true
 | `MUSIC_STUDIO_RATE_LIMIT_READ` / `_LLM` / `_CREATE` | `180` / `20` / `5` | 各接口窗口内最大请求数 |
 | `MUSIC_STUDIO_MAX_ACTIVE_JOBS` | `4` | 全局同时排队/生成中的任务上限 |
 | `MUSIC_STUDIO_MAX_ACTIVE_PER_CLIENT` | `2` | 单客户端活跃任务上限 |
+| `MUSIC_STUDIO_DAILY_LIMIT` | `50` | 每日生成配额（自然日）；`0` 表示不限制 |
+| `MUSIC_STUDIO_DAILY_RESET_UTC_OFFSET` | `8` | 配额日界的时区偏移（小时），默认北京时间 00:00 重置 |
 | `MUSIC_STUDIO_DEDUPE_WINDOW` | `30` | 已完成作品的重复提交窗口（秒） |
 | `MUSIC_STUDIO_MAX_REQUEST_BYTES` | `65536` | 请求体上限（字节） |
 | `MUSIC_STUDIO_TRUST_PROXY` | `false` | 是否信任 `X-Forwarded-For`（仅可信反代后开启） |
@@ -287,11 +309,11 @@ X-Deduplicated: true
 ## 八、验证
 
 ```bash
-# 离线端到端冒烟：/v1 前缀 / CORS / 建表 / UUIDv7 / LLM / 五阶段 / 幂等 / 413-422-429 / 空描述 / 模型兜底 / 音频 / 级联删除 / 重启恢复队列（71 项；启用 DELETE 路由时 76 项）
-backend/.venv/Scripts/python.exe backend/tests/smoke_test.py
+# 离线端到端冒烟：/v1 前缀 / CORS / 建表 / UUIDv7 / LLM / 五阶段 / 阶段遥测 / 幂等 / 413-422-429 / 每日配额 / 空描述 / 模型兜底 / 音频 / 级联删除 / 重启恢复队列（89 项；启用 DELETE 路由时 94 项）
+uv run --project backend python backend/tests/smoke_test.py
 
 # 启动真实服务
-uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
+uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
 curl http://localhost:8788/v1/health
 curl http://localhost:8788/v1/history
 ```

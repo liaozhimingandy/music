@@ -9,7 +9,9 @@
 * 读接口 ``enforce_read_policy``      -> 429；
 * 创建 ``enforce_generation_policy``  -> 429（请求频率）；
 * 创建另有 SongService 的幂等去重    -> 命中时返回已有作品 + ``X-Deduplicated``；
-* 活跃任务闸门在 SongService 的去重之后 -> 真新建超限时 429，不影响幂等重试。
+* 活跃任务闸门在 SongService 的去重之后 -> 真新建超限时 429，不影响幂等重试；
+* 每日配额（``MUSIC_STUDIO_DAILY_LIMIT``）同样在去重之后 -> 用完时 429 +
+  ``Retry-After``（到明日重置），并带 ``X-Daily-Remaining`` 等额度头。
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from fastapi.responses import FileResponse
 from ..deps import SongId, client_key, enforce_generation_policy, enforce_read_policy, reject_oversized_body
 from ..models import GenerationCreate, GenerationDetailResponse, GenerationResponse, StageResponse
 from ..services.runtime import get_song_service
-from ..services.song_service import SongService, TooManyActiveJobs
+from ..services.song_service import DailyQuotaExceeded, SongService, TooManyActiveJobs
 
 router = APIRouter(
     prefix="/generations",
@@ -58,6 +60,10 @@ async def create_generation(
     去重窗口内重复提交，直接返回已有作品并带上 ``X-Deduplicated: true``，
     不重复计费、不重复生成；``force=true`` 可显式要求再生成一次。
 
+    配额：``MUSIC_STUDIO_DAILY_LIMIT``（默认 50 首/天，0 不限）用完时返回
+    429 + ``Retry-After``（到明日重置的秒数），detail 是给用户看的中文说明；
+    未超额时用 ``X-Daily-Remaining`` / ``X-Daily-Reset`` 把剩余量告诉前端。
+
     不要把这里改成同步等待：真实生成可能耗时数十分钟，前端会超时。
     前端拿到记录后靠轮询 /v1/history 观察状态变化。
     """
@@ -71,8 +77,18 @@ async def create_generation(
     except TooManyActiveJobs as exc:
         # 并发闸门在 service 的幂等判断之后，因此走到这里一定是「真新建」。
         raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "30"}) from exc
+    except DailyQuotaExceeded as exc:
+        # 每日配额是「今天不能再生成」，退避时间给到明日重置，别让客户端反复重试。
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.quota.retry_after), **exc.quota.headers()},
+        ) from exc
     if result.deduplicated:
         response.headers["X-Deduplicated"] = "true"
+    # 正常创建 / 幂等复用都把剩余额度回给前端，用于在创作面板显示「今日还剩 X 首」
+    for key, value in (result.quota.headers() if result.quota else {}).items():
+        response.headers[key] = value
     return result.record
 
 

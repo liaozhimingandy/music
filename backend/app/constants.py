@@ -19,19 +19,28 @@ AUDIO_URL_TEMPLATE = f"{API_V1_PREFIX}/generations/{{song_id}}/audio"
 
 # 五阶段流程顺序（与 music.py 原型一致）
 # 顺序即执行顺序，也是 song_stages 表预置记录的顺序；调整会改变进度展示。
+# 注意：第四阶段叫 STAGE_MUSIC_PROMPT（生成「音乐制作方案」提示词），
+# 与第五阶段的 STAGE_MUSIC_GENERATION（真正调音乐生成接口）区分开。
 STAGE_PLANNING = "planning"
 STAGE_LYRICS = "lyrics"
 STAGE_POLISH = "polish"
-STAGE_MUSIC = "music"
+STAGE_MUSIC_PROMPT = "music_prompt"
 STAGE_MUSIC_GENERATION = "music_generation"
 
 STAGE_ORDER: tuple[str, ...] = (
     STAGE_PLANNING,
     STAGE_LYRICS,
     STAGE_POLISH,
-    STAGE_MUSIC,
+    STAGE_MUSIC_PROMPT,
     STAGE_MUSIC_GENERATION,
 )
+
+# 阶段名 -> prompts/ 子目录名。绝大多数阶段与目录同名，唯独
+# STAGE_MUSIC_PROMPT 沿用 prompts/music/ 目录（提示词文件不能移动/改名），
+# PromptManager.get_stage 据此解析模板路径。
+STAGE_PROMPT_DIRS: dict[str, str] = {
+    STAGE_MUSIC_PROMPT: "music",
+}
 
 # 每个阶段落盘的产物文件名；文件存在即代表该阶段已完成（断点续跑依据）。
 # 文件名沿用原型，便于直接复用 outputs/ 下已有的历史产物。
@@ -39,7 +48,7 @@ STAGE_OUTPUTS: dict[str, str] = {
     STAGE_PLANNING: "stage1.json",
     STAGE_LYRICS: "stage2.json",
     STAGE_POLISH: "stage2_polished.json",
-    STAGE_MUSIC: "stage3.json",
+    STAGE_MUSIC_PROMPT: "stage3.json",
     STAGE_MUSIC_GENERATION: "music_result.json",
 }
 
@@ -48,7 +57,7 @@ STAGE_LABELS: dict[str, str] = {
     STAGE_PLANNING: "歌曲策划",
     STAGE_LYRICS: "歌词创作",
     STAGE_POLISH: "歌词润色",
-    STAGE_MUSIC: "音乐制作方案",
+    STAGE_MUSIC_PROMPT: "音乐制作方案",
     STAGE_MUSIC_GENERATION: "音频生成",
 }
 

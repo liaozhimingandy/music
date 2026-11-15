@@ -1,16 +1,20 @@
 """service 层：五个可复用的创作阶段（全异步）。
 
-每个阶段只做「取输入 → 渲染 Prompt → 调 LLM → 校验结构 → 返回 dict」，
+每个阶段只做「取输入 → 渲染 Prompt → 调 LLM → 校验结构 → 返回结果」，
 不写数据库、不写文件，落盘与进度由 WorkflowService 统一负责，便于单测与复用。
 所有 IO（模板渲染、LLM 请求、音乐生成）都 ``await``，等待外部服务期间
 event loop 仍可处理前端的轮询请求。
 
+返回值约定：所有 ``run_*`` 返回 ``(阶段产物 dict, StageTelemetry)`` 二元组——
+产物落盘、遥测（模型 / token / 扩展指标）由 WorkflowService 写入
+song_stages，阶段函数本身不碰任何存储。
+
 五个阶段（顺序见 constants.STAGE_ORDER）：
 
-1. ``planning``  解析需求，产出 creation_spec
-2. ``lyrics``    产出分段歌词
-3. ``polish``    润色歌词 + 演唱设计
-4. ``music``     产出 ACE-Step 制作方案（style / 时长）
+1. ``planning``       解析需求，产出 creation_spec
+2. ``lyrics``         产出分段歌词
+3. ``polish``         润色歌词 + 演唱设计
+4. ``music_prompt``   产出 ACE-Step 制作方案（style / 时长）
 5. ``music_generation``（run_final_music）调用音乐生成接口并下载音频
 
 Prompt 模板变量严格对齐 backend/app/prompts（StrictUndefined，缺变量会直接报错）。
@@ -27,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import settings
-from ..constants import STAGE_LYRICS, STAGE_MUSIC, STAGE_PLANNING, STAGE_POLISH
+from ..constants import STAGE_LYRICS, STAGE_MUSIC_PROMPT, STAGE_PLANNING, STAGE_POLISH
 from ..dal import ArtifactStore
 from .prompt_manager import PromptManager
 
@@ -46,6 +50,22 @@ SECTION_LABELS: dict[str, str] = {
     "final_chorus": "最终副歌",
     "outro": "尾奏",
 }
+
+
+@dataclass
+class StageTelemetry:
+    """一个阶段的运行遥测，由 WorkflowService 写入 song_stages。
+
+    Attributes:
+        model: 该阶段实际使用的模型（LLM 模型名 / 音乐生成模型 ID）。
+        usage: OpenAI 风格 token 用量；音乐阶段与 mock 客户端为 None。
+        metrics: 扩展指标（远端 task_id 等）；elapsed_ms 由 WorkflowService
+            统一计时后合并，阶段函数不必自己计时。
+    """
+
+    model: str | None = None
+    usage: dict[str, int] | None = None
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -96,7 +116,7 @@ def _original_request(stage1: dict[str, Any]) -> str:
         raise ValueError("第一阶段缺少 input_summary.original_request") from exc
 
 
-async def run_planning(ctx: StageContext, user_input: str) -> dict[str, Any]:
+async def run_planning(ctx: StageContext, user_input: str) -> tuple[dict[str, Any], StageTelemetry]:
     """阶段 1：音乐创作需求解析与歌曲策划。
 
     模板变量：``original_request``。校验 stage 标识为 PLANNING 且存在
@@ -106,7 +126,7 @@ async def run_planning(ctx: StageContext, user_input: str) -> dict[str, Any]:
         raise ValueError("用户创作需求不能为空")
     prompt = await ctx.prompts.get_stage(STAGE_PLANNING, original_request=user_input.strip())
     logger.info("阶段 1：分析创作需求并生成歌曲策划")
-    result = await ctx.llm.chat_json(
+    result, reply = await ctx.llm.chat_json(
         prompt["system_prompt"],
         prompt["user_prompt"],
         temperature=0.7,
@@ -117,10 +137,10 @@ async def run_planning(ctx: StageContext, user_input: str) -> dict[str, Any]:
         raise ValueError("模型返回的阶段标识不正确（期望 PLANNING）")
     if not result.get("creation_spec"):
         raise ValueError("模型没有返回歌曲策划内容")
-    return result
+    return result, StageTelemetry(model=reply.model, usage=reply.usage)
 
 
-async def run_lyrics(ctx: StageContext, stage1: dict[str, Any]) -> dict[str, Any]:
+async def run_lyrics(ctx: StageContext, stage1: dict[str, Any]) -> tuple[dict[str, Any], StageTelemetry]:
     """阶段 2：根据歌曲策划生成完整原创歌词。
 
     模板变量：``original_request`` / ``creation_spec``（直接传对象给模板）。
@@ -134,7 +154,7 @@ async def run_lyrics(ctx: StageContext, stage1: dict[str, Any]) -> dict[str, Any
         creation_spec=stage1["creation_spec"],
     )
     logger.info("阶段 2：创作原创歌词")
-    result = await ctx.llm.chat_json(
+    result, reply = await ctx.llm.chat_json(
         prompt["system_prompt"],
         prompt["user_prompt"],
         temperature=0.8,
@@ -147,10 +167,12 @@ async def run_lyrics(ctx: StageContext, stage1: dict[str, Any]) -> dict[str, Any
     song = result.get("song")
     if not isinstance(song, dict) or not song.get("lyrics"):
         raise ValueError("模型返回的歌词为空")
-    return result
+    return result, StageTelemetry(model=reply.model, usage=reply.usage)
 
 
-async def run_polish(ctx: StageContext, stage1: dict[str, Any], stage2: dict[str, Any]) -> dict[str, Any]:
+async def run_polish(
+    ctx: StageContext, stage1: dict[str, Any], stage2: dict[str, Any]
+) -> tuple[dict[str, Any], StageTelemetry]:
     """阶段 3：歌词润色与旋律演唱设计。
 
     模板变量：``original_request`` / ``creation_spec`` / ``song``，后两者
@@ -171,7 +193,7 @@ async def run_polish(ctx: StageContext, stage1: dict[str, Any], stage2: dict[str
         song=json.dumps(song, ensure_ascii=False, indent=2),
     )
     logger.info("阶段 3：歌词润色与旋律设计")
-    result = await ctx.llm.chat_json(
+    result, reply = await ctx.llm.chat_json(
         prompt["system_prompt"],
         prompt["user_prompt"],
         temperature=0.7,
@@ -188,10 +210,12 @@ async def run_polish(ctx: StageContext, stage1: dict[str, Any], stage2: dict[str
         raise ValueError("润色后的歌词为空")
     if not polished.get("title"):
         raise ValueError("润色后的歌曲标题为空")
-    return result
+    return result, StageTelemetry(model=reply.model, usage=reply.usage)
 
 
-async def run_music_prompt(ctx: StageContext, stage1: dict[str, Any], polished: dict[str, Any]) -> dict[str, Any]:
+async def run_music_prompt(
+    ctx: StageContext, stage1: dict[str, Any], polished: dict[str, Any]
+) -> tuple[dict[str, Any], StageTelemetry]:
     """阶段 4：生成 ACE-Step 音乐制作方案。
 
     模板变量：target_model / original_request / music_spec / lyrics_direction /
@@ -204,7 +228,7 @@ async def run_music_prompt(ctx: StageContext, stage1: dict[str, Any], polished: 
     if not song.get("lyrics"):
         raise ValueError("最终歌词为空，无法生成音乐方案")
     prompt = await ctx.prompts.get_stage(
-        STAGE_MUSIC,
+        STAGE_MUSIC_PROMPT,
         target_model=model_name,
         original_request=_original_request(stage1),
         music_spec=json.dumps(creation_spec.get("music", {}), ensure_ascii=False, indent=2),
@@ -214,11 +238,11 @@ async def run_music_prompt(ctx: StageContext, stage1: dict[str, Any], polished: 
         vocal_melody_design=json.dumps(song.get("vocal_melody_design", {}), ensure_ascii=False, indent=2),
     )
     logger.info("阶段 4：生成音乐制作方案")
-    result = await ctx.llm.chat_json(
+    result, reply = await ctx.llm.chat_json(
         prompt["system_prompt"],
         prompt["user_prompt"],
         temperature=0.7,
-        stage=STAGE_MUSIC,
+        stage=STAGE_MUSIC_PROMPT,
         target_model=model_name,
         title=song["title"],
     )
@@ -226,10 +250,14 @@ async def run_music_prompt(ctx: StageContext, stage1: dict[str, Any], polished: 
         raise ValueError("目标模型不匹配")
     if result.get("song", {}).get("title") != song["title"]:
         raise ValueError("模型意外修改了歌曲标题")
-    return result
+    # 注意 model 记的是「跑这个阶段用的 LLM」，target_model 是方案里
+    # 要交给阶段五的音乐模型，两者含义不同，不要混用。
+    return result, StageTelemetry(model=reply.model, usage=reply.usage)
 
 
-async def run_final_music(ctx: StageContext, plan: dict[str, Any], *, instrumental: bool) -> dict[str, Any]:
+async def run_final_music(
+    ctx: StageContext, plan: dict[str, Any], *, instrumental: bool
+) -> tuple[dict[str, Any], StageTelemetry]:
     """阶段 5：按制作方案调用音乐生成接口并下载音频。
 
     纯音乐时把歌词固定为 ``[Instrumental]``；其余情况用方案里的最终歌词。
@@ -246,4 +274,10 @@ async def run_final_music(ctx: StageContext, plan: dict[str, Any], *, instrument
         duration=duration,
         work_dir=ctx.music_work_dir,
     )
-    return {**result, "title": title, "prompt": style, "duration": duration}
+    # 音乐生成没有 token 用量；model 取 provider 实际提交的模型，
+    # 远端 task_id 放进 metrics，排查生成失败时可直接拿去查 provider 后台。
+    telemetry = StageTelemetry(
+        model=result.get("model") or ctx.config.music_model,
+        metrics={"provider_task_id": result.get("task_id"), "duration_seconds": duration},
+    )
+    return {**result, "title": title, "prompt": style, "duration": duration}, telemetry

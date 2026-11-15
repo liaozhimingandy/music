@@ -8,7 +8,14 @@
 -> entities 实体字段 -> schemas 响应模型 -> SongService 组装逻辑。
 """
 
-from .db_schema import POST_MIGRATION_SQL, SCHEMA_SQL, SONG_COLUMNS, SONG_TABLE_MIGRATIONS, STAGE_COLUMNS
+from .db_schema import (
+    POST_MIGRATION_SQL,
+    SCHEMA_SQL,
+    SONG_COLUMNS,
+    SONG_TABLE_MIGRATIONS,
+    STAGE_COLUMNS,
+    STAGE_TABLE_MIGRATIONS,
+)
 from .entities import SongRecord, StageRecord
 from .schemas import (
     GenerationCreate,
@@ -25,6 +32,7 @@ __all__ = [
     "SCHEMA_SQL",
     "POST_MIGRATION_SQL",
     "SONG_TABLE_MIGRATIONS",
+    "STAGE_TABLE_MIGRATIONS",
     "SONG_COLUMNS",
     "STAGE_COLUMNS",
     "SongRecord",
