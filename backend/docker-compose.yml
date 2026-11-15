@@ -14,7 +14,7 @@
 #
 # 端口（改端口要同步改这三处，漏一处就 502 / 探针失败）：
 #   容器内监听 8000   —— 由 backend/Dockerfile 的 CMD 固定（FastAPI 官方默认）
-#   宿主机映射 18788  —— 下面的 ports；宿主机侧不要再用 8000，本地前端 dev/preview 已占用
+#   宿主机映射 8000   —— 下面的 ports；前端 dev 直连 http://localhost:8000/v1
 #   Traefik 转发 8000 —— 下面 labels 的 server.port，必须是**容器内**端口
 #
 # 健康检查：探 /v1/health，不健康就不转发流量。
@@ -30,14 +30,14 @@ x-logging: &default-logging
 services:
   backend:
     # 本地构建用独立变量名，避免被意外打上远端 tag。
-    image: registry.cn-hangzhou.aliyuncs.com/liaozhiming/music-studio-backend:sha-f14940b
+    image: registry.cn-hangzhou.aliyuncs.com/liaozhiming/music-studio-backend:sha-7e158ec
     container_name: prod-oa-music-01
     restart: unless-stopped
     # 读取同级 .env（默认当前目录 ./.env；位置不同用 ENV_FILE 覆盖）。
     # required:false 保证缺 .env 也能起（走 mock / 缺密钥状态，便于先验证镜像）。
     # 宿主机端口 -> 容器端口（容器内固定 8000）。
     ports:
-      - 18788:8000
+      - 8000:8000
     env_file:
       - .env
     environment:
@@ -62,25 +62,28 @@ services:
       retries: 3
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.fastapi-tools.rule=Host(`apit-tools.alsoapp.com`)"
-      - "traefik.http.routers.fastapi-tools.entrypoints=websecure"
-      - "traefik.http.routers.fastapi-tools.tls=true"
-      - "traefik.http.routers.fastapi-tools.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.music.rule=Host(`api-music.alsoapp.com`)"
+      - "traefik.http.routers.music.entrypoints=websecure"
+      - "traefik.http.routers.music.tls=true"
+      - "traefik.http.routers.music.tls.certresolver=letsencrypt"
       # 必须是**容器内**实际监听的端口（即 8000），不是宿主机映射出去的端口。
       # 写错会导致 Traefik 转发到无人监听的端口 → 502。
-      - "traefik.http.services.fastapi-tools.loadbalancer.server.port=8000"
+      - "traefik.http.services.music.loadbalancer.server.port=8000"
       # 告诉 Traefik 用哪个 Docker 网络访问本容器，要与下面 networks 里的实际网络名一致。
-      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik}"
+      - "traefik.docker.network=proxy"
     logging: *default-logging
 
 volumes:
   music-data:
 
-# 复用 Traefik 所在网络。显式给 name（不加 compose 项目名前缀），网络名稳定可预期，
-# 并与上面 traefik.docker.network 标签保持一致。
-#   生产：该网络通常由 Traefik 先创建，此时应改为 external: true 直接复用，
-#         并用 TRAEFIK_NETWORK 指定真实网络名（例如 traefik）。
+# 当前是**项目私有网络**（compose 默认生成 music-studio-backend_proxy，不加 external），
+# 标签里的 traefik.docker.network 已与之保持一致。
+#
+# 接入外部 Traefik 时改成复用 Traefik 所在网络（两处必须同时改，否则 Traefik 接不进来）：
+#   networks:
+#     proxy:
+#       name: ${TRAEFIK_NETWORK:-traefik}
+#       external: true
+#   并把 TRAEFIK_NETWORK 设成真实网络名。
 networks:
   proxy:
-    name: ${TRAEFIK_NETWORK:-traefik}
-    # external: true

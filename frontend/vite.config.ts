@@ -35,34 +35,13 @@ function spa404(): Plugin {
 }
 
 /**
- * 读取 backend/.env 里的 PORT（与后端 run.py 用的同一份配置）。
- * 找不到 / 没写 / 写法不认（注释行、带引号等）就返回 null，由调用方兜底 8788。
+ * 不再配置 /v1 同源代理：前端直连后端（VITE_APP_API_BASE_URL 为绝对地址，
+ * 见 frontend/.env.development），跨域由后端 CORS_ORIGINS 显式放行。
+ * 这样开发环境的请求链路与生产一致，不会出现「代理指向错端口」这类隐蔽故障。
  */
-function readBackendPort(): number | null {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const envFile = path.resolve(here, "../backend/.env");
-  if (!fs.existsSync(envFile)) return null;
-  const match = fs.readFileSync(envFile, "utf8").match(/^\s*PORT\s*=\s*"?(\d{1,5})"?/m);
-  if (!match) return null;
-  const port = Number(match[1]);
-  return port > 0 && port < 65536 ? port : null;
-}
-
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
   const base = process.env.VITE_BASE_PATH || env.VITE_BASE_PATH || "/";
-
-  // 与后端 API_V1_PREFIX（/v1）保持一致；dev 与 preview 共用同一份代理规则。
-  // 后端端口可用 VITE_API_PROXY_TARGET 覆盖（例如自己用 8000 端口启动后端时）。
-  // 走同源代理（VITE_APP_API_BASE_URL=/v1）时完全不产生跨域请求，是最省心的方案；
-  // 直连完整地址时才依赖后端 CORS。
-  //
-  // 默认端口跟着 backend/.env 的 PORT 走：后端改端口后不必再手动改这里，
-  // 否则 dev 代理会指向没人监听的端口，表现为「前端一直转圈 / 网络错误」。
-  const backendPort = readBackendPort() ?? 8788;
-  const proxyTarget =
-    process.env.VITE_API_PROXY_TARGET || env.VITE_API_PROXY_TARGET || `http://127.0.0.1:${backendPort}`;
-  const apiProxy = { "/v1": { target: proxyTarget, changeOrigin: true } };
 
   return {
     base,
@@ -75,12 +54,10 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5175,
       host: "0.0.0.0",
-      proxy: apiProxy,
     },
     preview: {
       port: 5175,
       host: "127.0.0.1",
-      proxy: apiProxy,
     },
   };
 });
