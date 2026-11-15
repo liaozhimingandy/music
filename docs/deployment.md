@@ -359,7 +359,7 @@ docker compose start backend
 
 ```bash
 cd frontend && npm run dev            # 5175
-uv run --project backend uvicorn app.main:app --app-dir backend --reload --port 8788
+uv run --project backend python backend/run.py
 ```
 
 改完代码想验证镜像：

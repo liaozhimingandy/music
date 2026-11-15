@@ -9,7 +9,7 @@
 等待模型响应时不会阻塞 event loop 上的其它请求（前端轮询照常返回）。
 长连接 ``AsyncClient`` 由 WorkflowService.aclose() 在应用关闭时释放。
 
-配置来源为 backend/app/.env（见 .env.example）：LLM_BASE_URL / LLM_MODEL /
+配置来源为 backend/.env（见 .env.example）：LLM_BASE_URL / LLM_MODEL /
 LLM_API_KEY / LLM_CA_CERT 与三个超时值。CA 证书是可选的，用于企业代理
 场景下的自签名证书；路径经 ``config.resolve_ca_cert`` 解析（相对 .env 所在
 的 backend/app 优先），找不到时打印告警并回退到系统默认证书校验。

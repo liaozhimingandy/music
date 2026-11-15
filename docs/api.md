@@ -279,12 +279,12 @@ X-Deduplicated: true
 | `MUSIC_API_TOKEN` | 空 | ModelScope token，**只放 .env，不进代码** |
 | `MUSIC_API_BASE_URL` / `MUSIC_MODEL` | 见 `.env.example` | 生成接口与模型 |
 | `MUSIC_STUDIO_MOCK` | `false` | `true` 时全流程离线跑（本地 WAV + 桩数据），不消耗密钥 |
-| `ACE_STEP_HOST` / `ACE_STEP_PORT` | `0.0.0.0` / `8788` | 启动脚本沿用 |
-| `CORS_ORIGINS` | 空 | 额外允许的跨域来源，逗号分隔或 JSON 数组（见 3.4） |
+| `HOST` / `PORT` | `0.0.0.0` / `8788` | 绑定地址 / 端口；兼容旧别名 `ACE_STEP_HOST/PORT`、`MUSIC_STUDIO_HOST/PORT` |
+| `CORS_ORIGINS` | 空 | 额外允许的跨域来源，逗号分隔或 JSON 数组（见 3.4）；别名 `MUSIC_STUDIO_CORS_ORIGINS` |
 | `MUSIC_STUDIO_CORS_ORIGIN_REGEX` | 回环地址正则 | 默认放行 localhost / 127.0.0.1 / [::1] 任意端口；设为空可关闭 |
 | `MUSIC_STUDIO_DATA_DIR` | `<仓库根>/data` | 数据库与产物目录 |
 
-接口防护配置（完整注释见 `backend/app/.env.example`）：
+接口防护配置（完整注释见 `backend/.env.example`）：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -313,7 +313,7 @@ X-Deduplicated: true
 uv run --project backend python backend/tests/smoke_test.py
 
 # 启动真实服务
-uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
+uv run --project backend python backend/run.py
 curl http://localhost:8788/v1/health
 curl http://localhost:8788/v1/history
 ```

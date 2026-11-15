@@ -80,7 +80,7 @@ class MusicProvider:
         """
         # --- 入参校验：这些错误不值得发网络请求 ---
         if not self.token:
-            raise RuntimeError("未配置 MUSIC_API_TOKEN，请在 backend/app/.env 中填写")
+            raise RuntimeError("未配置 MUSIC_API_TOKEN，请在 backend/.env 中填写")
         if not prompt or not prompt.strip():
             raise ValueError("音乐描述 prompt 不能为空")
         if not lyrics or not lyrics.strip():

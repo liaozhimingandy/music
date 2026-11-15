@@ -45,10 +45,10 @@ npm run preview        # http://localhost:5175，同样代理 /v1 到 8788
 ```bash
 # 一次性安装（没有 uv：见 https://docs.astral.sh/uv/getting-started/installation/）
 uv sync --project backend                                    # 建 backend/.venv，按 uv.lock 安装
-cp backend/app/.env.example backend/app/.env                 # 填入 LLM / ModelScope 密钥
+cp backend/.env.example backend/.env                 # 填入 LLM / ModelScope 密钥
 
 # 启动（仓库根目录）
-uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
+uv run --project backend python backend/run.py
 ```
 
 依赖版本由 `backend/uv.lock` 锁定，`uv sync` 按锁文件安装；新增依赖用 `uv add --project backend <包名>`（会一并更新锁文件，别手改）。生产镜像里是 `uv sync --frozen --no-dev`，与本地完全一致。
@@ -234,7 +234,7 @@ backend/app/
 
 ## 配置项（后端）
 
-配置集中在 `backend/app/config.py`，模板为 `backend/app/.env.example`；真实密钥放 `backend/app/.env`（已忽略）。
+配置集中在 `backend/app/config.py`，模板为 `backend/.env.example`；真实密钥放 `backend/.env`（已忽略）。
 
 | 变量 | 用途 |
 | --- | --- |
@@ -243,7 +243,7 @@ backend/app/
 | `MUSIC_API_TOKEN` | ModelScope token（**只放 .env**） |
 | `MUSIC_API_BASE_URL` / `MUSIC_MODEL` | 生成接口与模型 |
 | `MUSIC_STUDIO_MOCK` | `true` 时全流程离线演示，不调用外部 API |
-| `ACE_STEP_HOST` / `ACE_STEP_PORT` | 绑定地址 / 端口（启动脚本沿用） |
+| `HOST` / `PORT` | 绑定地址 / 端口，默认 `0.0.0.0` / `8788`（兼容旧别名 `ACE_STEP_HOST/PORT`） |
 | `MUSIC_STUDIO_DATA_DIR` | 数据库与产物目录，默认 `<仓库根>/data` |
 | `MUSIC_STUDIO_RATE_LIMIT_ENABLED` | 接口防护总开关，默认 `true` |
 | `MUSIC_STUDIO_RATE_LIMIT_WINDOW` | 限流滑动窗口长度（秒），默认 `60` |
@@ -255,7 +255,7 @@ backend/app/
 | `MUSIC_STUDIO_MAX_REQUEST_BYTES` | 请求体上限（字节），默认 `65536` |
 | `MUSIC_STUDIO_TRUST_PROXY` | 是否信任 `X-Forwarded-For`，默认 `false` |
 
-完整默认值与注释见 `backend/app/.env.example`；生产环境请勿关闭防护总开关。
+完整默认值与注释见 `backend/.env.example`；生产环境请勿关闭防护总开关。
 
 ## 仓库
 

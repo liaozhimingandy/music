@@ -117,11 +117,11 @@ backend/app/
 # 1. 依赖（Python 3.10+；uv 安装方式见 https://docs.astral.sh/uv/getting-started/installation/）
 uv sync --project backend                        # 建 backend/.venv，按 uv.lock 安装
 
-# 2. 配置
-cp backend/app/.env.example backend/app/.env    # 填入 LLM / ModelScope 密钥
+# 2. 配置（模板在 backend/.env.example，复制到 backend/.env 填入 LLM / ModelScope 密钥）
+cp backend/.env.example backend/.env
 
-# 3. 启动（在仓库根目录执行）
-uv run --project backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788
+# 3. 启动（在仓库根目录执行；绑定地址读 backend/.env 的 HOST/PORT，默认 0.0.0.0:8788）
+uv run --project backend python backend/run.py
 ```
 
 运行时依赖仅 8 个：fastapi / uvicorn / pydantic / pydantic-settings / python-dotenv / httpx / Jinja2 / aiosqlite，无需 torch 或本地模型权重。加依赖用 `uv add --project backend <包名>`，它会同时更新 `uv.lock`（锁文件必须一起提交，镜像构建用 `uv sync --frozen` 保证一致）。
