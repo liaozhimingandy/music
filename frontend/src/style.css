@@ -7,6 +7,23 @@
  *          -> 状态标签 -> 同步歌词 -> 生成中动效 -> 骨架屏 -> 无障碍降级。
  * Tailwind 的 brand-* 色阶在 tailwind.config.js 定义，与此处 --td-brand-* 配套；
  * 改主色时两个文件要一起改，否则按钮与进度条颜色会不一致。
+ *
+ * ===========================================================================
+ * ⚠️ 一条容易踩的坑：TDesign 组件样式压过 Tailwind 工具类
+ * ===========================================================================
+ * 产物 CSS 里 TDesign 的组件样式排在 Tailwind 工具类**之后**（实测 dist 产物
+ * 中 .t-button 的位置 39020 > .hidden 的位置 18998），而两者选择器优先级相同
+ * （都是单类 0,1,0），于是**后者胜**：TDesign 赢。
+ *
+ * 后果：直接给 TDesign 组件加 `hidden` / `md:inline-flex` 是**无效**的——
+ * .t-button { display: flex } 会盖掉 .hidden { display: none }，
+ * .t-icon { display: inline-block } 同理。
+ *
+ * 正确写法：用普通元素（span / div）包一层，让响应式类挂在普通元素上：
+ *     <span class="hidden md:inline-flex"><TButton ... /></span>
+ * 普通元素上没有 TDesign 的 display 规则，工具类才能正常生效。
+ * 同理，自定义类与 TDesign 同名选择器冲突时要提高优先级
+ * （见下方 .ace-segment.t-radio-group 的写法）。
  */
 
 :root {
@@ -42,6 +59,41 @@ body,
 #app {
   height: 100%;
   margin: 0;
+}
+
+/* ===========================================================================
+ * 应用外壳高度
+ * 100dvh 会跟着移动端浏览器地址栏的收起/展开实时变化，避免内容被地址栏
+ * 遮住底部一截；老浏览器不认识 dvh 时回落到 100vh。
+ * =========================================================================== */
+.ace-app-shell {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* ===========================================================================
+ * 窄屏顶部分段切换（t-radio-group 改造）
+ *
+ * 选择器写成 `.ace-segment.t-radio-group` 而不是只用 `.ace-segment`：
+ * TDesign 的 `.t-radio-group` 自带 `display:inline-flex; width:fit-content`，
+ * 与自定义类**优先级相同**，谁生效取决于样式表的注入顺序（实测 TDesign 的
+ * CSS 会排在后面），单写 `.ace-segment` 会被它盖掉。复合选择器把优先级
+ * 提到 (0,2,0)，就不再依赖注入顺序。
+ *
+ * position:relative 是给滑动指示块 (.t-radio-group__bg-block) 用的——
+ * 否则它会相对更外层的定位祖先去偏移。
+ * =========================================================================== */
+.ace-segment.t-radio-group {
+  position: relative;
+  display: flex;
+  width: 100%;
+  flex-wrap: nowrap;
+}
+.ace-segment.t-radio-group .t-radio-button {
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: center;
+  text-align: center;
 }
 
 button,

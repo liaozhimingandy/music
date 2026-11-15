@@ -140,6 +140,7 @@ frontend/
     │   ├── config.ts       # 运行期配置（环境变量集中读取）
     │   ├── constants.ts    # 阶段顺序与中文名、描述字数上限（500）
     │   ├── lyric.ts        # 歌词解析与时间轴（LRC / 按字重估算）
+    │   ├── useMediaQuery.ts # 媒体查询结果转 ref（布局形态切换用）
     │   └── utils.ts        # 中文文案、格式化、封面配色与图标
     ├── interface/
     │   └── index.ts        # 与后端对齐的数据结构
@@ -147,7 +148,8 @@ frontend/
     │   ├── index.ts        # axios 实例 + 请求/响应拦截器
     │   └── api.ts          # 接口地址集中管理 + 请求函数
     ├── pages/
-    │   └── StudioPage.vue  # 主页面：状态、生成流程、播放控制、歌词时间轴
+    │   ├── StudioPage.vue  # 主页面：状态、生成流程、播放控制、歌词时间轴、响应式布局切换
+    │   └── NotFoundPage.vue # 404 页（未匹配路由的兜底）
     └── components/
         ├── CreatePanel.vue     # 左：简单创作（Enter 提交）
         ├── LibraryPanel.vue    # 中：作品库（生成态动效 / 骨架屏）
@@ -157,8 +159,13 @@ frontend/
         └── MiniPlayer.vue      # 右下角迷你播放器，恢复播放栏
 ```
 
-技术栈：Vue 3.5（`<script setup>` 组合式 API）+ TypeScript + Vite 5 + TDesign Vue Next（组件）+ tdesign-icons-vue-next（图标）+ TailwindCSS（布局）+ **axios**（请求）。
-保持轻量：单页应用只用一个 `pages/`，未引入 vue-router / pinia；组件间用 props / emits 通信，作品列表用 2 秒定时轮询刷新。
+技术栈：Vue 3.5（`<script setup>` 组合式 API）+ TypeScript + Vite 5 + TDesign Vue Next（组件）+ tdesign-icons-vue-next（图标）+ TailwindCSS（布局）+ vue-router（history 模式 + 404 兜底）+ **axios**（请求）。
+保持轻量：单页应用只有一个业务页面，状态用组合式 API 管理，未引入 pinia；组件间用 props / emits 通信，作品列表用 2 秒定时轮询刷新。
+
+**响应式布局**：宽屏（≥992px）用 TDesign 栅格 `t-row` / `t-col` 三栏并排（创作 4/5/3 列，≥1200px 时 3/6/3）；
+窄屏改为单栏 + 顶部分段切换（创作 / 作品库 / 详情），点卡片自动进详情。
+Tailwind 的 `screens` 已整体替换为与 TDesign 栅格一致的断点（768 / 992 / 1200 / 1400 / 1880）。
+完整约定与两个易踩的坑见 [前端布局与响应式约定](./docs/frontend.md)。
 
 ## 请求层
 
@@ -224,7 +231,7 @@ backend/app/
 │   └── uv.lock         # 锁定的依赖版本，镜像构建用 --frozen 保证一致
 ├── frontend/           # 中文单页前端（Vue 3），构建产物由 GitHub Pages 静态托管
 ├── docker-compose.yml  # 本地/源码构建版编排
-├── docs/               # 安装指南、接口清单、Docker 部署、证书与 HTTPS 信任、截图
+├── docs/               # 安装指南、接口清单、Docker 部署、证书与 HTTPS 信任、前端布局约定、截图
 ├── scripts/            # 各平台安装与启动脚本
 ├── .github/workflows/  # Pages 部署 + 镜像发布（Docker Hub / 阿里云 ACR）
 ├── data/               # 运行时数据（SQLite、音频、封面，已忽略）
@@ -278,4 +285,5 @@ GitHub Pages 的 base 默认取 `.env.production` 的 `/`（自定义域名场�
 - [Docker 部署](./docs/deployment.md) — 镜像仓库配置、云服务器部署、HTTPS、升级回滚、备份与排障
 - [证书与 HTTPS 信任](./docs/certificate.md) — 两个 TLS 方向的区别、其他设备如何导入根证书、前端为何不能嵌入根证书
 - [后端接口清单](./docs/api.md) — 8 个接口、幂等去重与限流规则、UUIDv7、五阶段流程与 SQLite 表结构
+- [前端布局与响应式约定](./docs/frontend.md) — 桌面三栏栅格与移动端单栏切换、断点对齐、样式优先级与触屏交互的坑
 - [后端说明](./backend/README.md) — 分层、运行、离线演示与冒烟测试

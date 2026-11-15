@@ -116,8 +116,13 @@ function onEnterDown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <aside class="w-[360px] min-w-[320px] bg-surface border-r border-line flex flex-col shadow-panel z-10">
-    <div class="px-5 py-4 border-b border-line">
+  <!--
+    面板宽度交给外层栅格（t-col）决定，这里只用 w-full h-full 撑满所在列。
+    早期版本写死 w-[360px] min-w-[320px]，窄屏下三栏加起来远超视口宽度，
+    右边的详情栏被挤出屏幕完全点不到——那正是这次改成栅格 + 单栏的原因。
+  -->
+  <aside class="w-full h-full bg-surface border-r border-line flex flex-col shadow-panel z-10">
+    <div class="px-4 md:px-5 py-3 md:py-4 border-b border-line flex-shrink-0">
       <div class="flex items-center gap-2">
         <SoundIcon size="20px" class="text-brand-600" />
         <h2 class="text-base font-semibold">简单创作</h2>
@@ -125,7 +130,8 @@ function onEnterDown(event: KeyboardEvent) {
       <p class="text-xs text-subtle mt-1">描述你的想法，AI 帮你写成一首歌</p>
     </div>
 
-    <div class="ace-scroll flex-1 overflow-y-auto px-5 py-5 space-y-5" @keydown="onEnterDown">
+    <div class="ace-scroll flex-1 min-h-0 overflow-y-auto px-4 md:px-5 py-4 md:py-5 space-y-5" @keydown="onEnterDown">
+
       <div>
         <div class="flex items-center justify-between mb-2">
           <label class="text-sm font-medium">歌词 / 歌曲描述</label>
@@ -143,20 +149,21 @@ function onEnterDown(event: KeyboardEvent) {
         <p class="text-xs mt-2" :class="nearLimit ? 'text-brand-600' : 'text-subtle'">
           {{ nearLimit ? `已接近字数上限（${charCount} / ${MAX_PROMPT_LENGTH}）` : "提交后由后端自动完成策划、写词与编曲。" }}
         </p>
-        <p class="text-[11px] text-subtle mt-1.5 flex items-center gap-1">
+        <!-- 快捷键提示只在有物理键盘时才有意义，窄屏（触屏）隐藏 -->
+        <p class="hidden md:flex items-center gap-1 text-[11px] text-subtle mt-1.5">
           <kbd class="ace-kbd">Enter</kbd> 直接生成
           <span class="text-line">·</span>
           <kbd class="ace-kbd">Shift</kbd>+<kbd class="ace-kbd">Enter</kbd> 换行
         </p>
       </div>
     </div>
-    <div class="px-5 py-4 border-t border-line">
+    <div class="px-4 md:px-5 py-3 md:py-4 border-t border-line flex-shrink-0">
       <div :class="{ 'ace-sweep': isSubmitting }">
         <TButton block size="large" theme="primary" :loading="isSubmitting" :disabled="!canSubmit" @click="submit()">
           {{ isSubmitting ? "排队生成中…" : "开始生成" }}
         </TButton>
       </div>
-      <p class="text-[11px] mt-2 text-center" :class="{ 'ace-shimmer-text font-medium': isSubmitting, 'text-amber-600': quotaExhausted }">
+      <p class="text-[11px] mt-2 text-center leading-4" :class="{ 'ace-shimmer-text font-medium': isSubmitting, 'text-amber-600': quotaExhausted }">
         {{
           isSubmitting
             ? "已提交，正在排队生成，请稍候…"

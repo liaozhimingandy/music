@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 主工作台页面：三栏布局（简单创作 / 作品库 / 歌曲详情）+ 底部播放器。
+ * 主工作台页面：桌面三栏栅格（简单创作 / 作品库 / 歌曲详情）+ 底部播放器。
  *
  * 本组件是全局状态中枢，子组件都是「受控组件」：只接收 props、通过 emit
  * 把用户操作交回这里处理，不自己发请求。
@@ -14,9 +14,27 @@
  *
  * 关键函数：handleCreate（提交生成任务）、switchTrack（切歌）、
  * handleCancelPending / handleDownload / showLibrary。
+ *
+ * ---------------------------------------------------------------------------
+ * 响应式布局（两套互斥的 DOM，用 v-if 切换，不是纯 CSS 隐藏）
+ * ---------------------------------------------------------------------------
+ * - 宽屏（>= 992px，TDesign md 断点）：t-row / t-col 栅格三栏并排，
+ *   各自占 4/5/3（>=1200px 时 3/6/3）列，三栏各自内部独立滚动。
+ * - 窄屏（< 992px）：三栏塞不下（原来写死的 360 + 340px 会把右栏挤出屏幕），
+ *   改成单栏 + 顶部 t-radio-group 分段切换：创作 / 作品库 / 详情。
+ *   点作品卡自动切到「详情」，详情页的关闭按钮切回「作品库」。
+ *
+ * 两套 DOM 必须互斥（v-if / v-else），否则作品库卡片会出现重复的
+ * id="song-xxx"，showLibrary() 的 scrollIntoView 会打到隐藏的那一份上。
  */
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
+import {
+  Col as TCol,
+  RadioButton as TRadioButton,
+  RadioGroup as TRadioGroup,
+  Row as TRow,
+} from "tdesign-vue-next";
 import { MusicIcon, ViewListIcon } from "tdesign-icons-vue-next";
 
 import { createGeneration, fetchHealth, listHistory, resolveAudioUrl, runLLMTask } from "@/services/api";
@@ -30,8 +48,13 @@ import type { CreateFormValues, GenerationResponse, PendingGeneration } from "@/
 import { cleanTitle, truncateText } from "@/common/utils";
 import { buildLyricTimeline, findActiveLyricIndex, pickLrc, type LyricItem } from "@/common/lyric";
 import { config } from "@/common/config";
+import { useMediaQuery } from "@/common/useMediaQuery";
 
 type BackendState = "checking" | "online" | "offline";
+
+/** 窄屏（单栏模式）下当前显示的分区 */
+type MobileView = "create" | "library" | "detail";
+
 
 /** 今日配额快照（来自 /v1/health）；remaining 为 null 表示后端不限额 */
 type QuotaState = { limit: number; used: number; remaining: number | null; resetAt: string | null };
@@ -96,6 +119,14 @@ const lyricShift = ref(0);
 const lyricAligning = ref(false);
 /** 今日生成配额（后端 MUSIC_STUDIO_DAILY_LIMIT）；null 表示还没取到 */
 const quota = ref<QuotaState | null>(null);
+
+/**
+ * 宽屏（>= 992px）走三栏栅格，窄屏走单栏 + 顶部切换。
+ * 断点与 TDesign 的 md 一致，也与 tailwind.config.js 的 md: 前缀一致。
+ */
+const isDesktop = useMediaQuery("(min-width: 992px)");
+/** 窄屏模式下当前显示的分区 */
+const mobileView = ref<MobileView>("create");
 
 let autoSelected = false;
 let autoPlayNext = false;
@@ -325,6 +356,19 @@ watch(playerVisible, (value) => {
  */
 function selectSong(id: string) {
   selectedId.value = id;
+  // 窄屏单栏模式下右栏不再并排显示，点卡片等于「打开详情」——
+  // 不切过去的话用户点了卡片却什么都没发生。
+  if (!isDesktop.value) mobileView.value = "detail";
+}
+
+/**
+ * 关闭详情面板。
+ * 宽屏：右栏整体消失（原本的行为）。
+ * 窄屏：右栏是独立分区，关掉后必须退回作品库，否则会停在一个空白的详情页。
+ */
+function handleCloseDetail() {
+  selectedId.value = undefined;
+  if (!isDesktop.value) mobileView.value = "library";
 }
 
 function handlePlayPause() {
@@ -370,11 +414,21 @@ function switchTrack(step: -1 | 1) {
   }
 }
 
-function showLibrary() {
+/**
+ * 「定位到作品库」：播放条上的列表按钮。
+ *
+ * 窄屏下作品库可能不是当前分区，必须先切过去、等 DOM 渲染出来再滚动，
+ * 否则 scrollIntoView 会落在还没挂载（或 display:none）的节点上，什么都不发生。
+ */
+async function showLibrary() {
   const id = selectedId.value || history.value[0]?.id;
   if (!id) {
     MessagePlugin.info("作品库还没有歌曲");
     return;
+  }
+  if (!isDesktop.value) {
+    mobileView.value = "library";
+    await nextTick();
   }
   const target = document.getElementById(`song-${id}`);
   if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -560,63 +614,151 @@ async function handleExpand(prompt: string, instrumental: boolean): Promise<stri
 </script>
 
 <template>
-  <div class="h-screen flex flex-col bg-canvas text-ink font-sans">
-    <!-- 网易云风格红色顶栏 -->
-    <header class="h-16 flex-shrink-0 flex items-center justify-between px-6 shadow-panel z-30 bg-brand-700">
-      <div class="flex items-center gap-3">
-        <div class="h-10 w-10 rounded-full bg-white/15 flex items-center justify-center border border-white/25">
-          <MusicIcon size="22px" class="text-white" />
+  <div class="ace-app-shell flex flex-col bg-canvas text-ink font-sans">
+    <!-- 网易云风格红色顶栏（窄屏压缩为 48px，标题只留主名） -->
+    <header class="h-12 md:h-16 flex-shrink-0 flex items-center justify-between px-3 md:px-6 gap-2 shadow-panel z-30 bg-brand-700">
+      <div class="flex items-center gap-2 md:gap-3 min-w-0">
+        <div
+          class="h-8 md:h-10 w-8 md:w-10 rounded-full bg-white/15 flex items-center justify-center border border-white/25 flex-shrink-0"
+        >
+          <!--
+            响应式显隐必须放在**普通元素**上：TDesign 组件自带 display 规则
+            （.t-icon / .t-button），与 Tailwind 的 .hidden 同优先级且在产物里
+            排在后面，直接写 hidden 会失效。详见 style.css 的说明。
+          -->
+          <span class="md:hidden"><MusicIcon size="18px" class="text-white" /></span>
+          <span class="hidden md:block"><MusicIcon size="22px" class="text-white" /></span>
         </div>
-        <div>
-          <h1 class="text-base font-semibold leading-5 text-white">Music Studio · 音乐创作台</h1>
-        </div>
-        <span class="netease-status ml-1">{{ backendLabel }}</span>
+        <h1 class="text-sm md:text-base font-semibold leading-5 text-white truncate">
+          Music Studio<span class="hidden md:inline"> · 音乐创作台</span>
+        </h1>
+        <span class="netease-status ml-1 flex-shrink-0">{{ backendLabel }}</span>
       </div>
       <button
-        class="h-8 px-3 rounded-full text-xs flex items-center gap-1.5 text-white bg-white/15 hover:bg-white/25 border border-white/20 transition-colors"
+        class="h-8 px-2 md:px-3 rounded-full text-xs flex items-center gap-1.5 text-white bg-white/15 hover:bg-white/25 border border-white/20 transition-colors flex-shrink-0"
         :title="playerVisible ? '隐藏底部播放器' : '显示底部播放器'"
         @click="playerVisible = !playerVisible"
       >
         <ViewListIcon size="15px" />
-        {{ playerVisible ? "隐藏播放器" : "显示播放器" }}
+        <span class="hidden md:inline">{{ playerVisible ? "隐藏播放器" : "显示播放器" }}</span>
       </button>
     </header>
 
-    <main class="flex flex-1 overflow-hidden">
-      <CreatePanel
-        :is-submitting="flowRunning"
-        :expand-prompt="handleExpand"
-        :quota="quota"
-        @submit="handleCreate"
-      />
-      <LibraryPanel
-        :items="history"
-        :pending-items="pending"
-        :selected-id="selectedId"
-        :currently-playing-id="playingId ?? undefined"
-        :is-playing="isPlaying"
-        :loading="backend === 'checking'"
-        @select="selectSong"
-        @cancel="handleCancelPending"
-        @toggle-play="handleCardTogglePlay"
-        @download="handleDownload"
-      />
-      <SongDetailPanel
-        v-if="selectedSong"
-        :song="selectedSong"
-        :lyric-items="lyricItems"
-        :active-lyric-index="activeLyricIndex"
-        :lyric-estimated="lyricEstimated"
-        :lyric-shift="lyricShift"
-        :lyric-aligning="lyricAligning"
-        @close="selectedId = undefined"
-        @download="handleDownload(selectedSong)"
-        @seek-lyric="handleLyricSeek"
-        @shift-lyric="adjustLyricShift"
-        @toggle-align="toggleLyricAlign"
-        @align-lyric="handleLyricAlign"
-      />
+    <!--
+      宽屏（>= 992px）：TDesign 栅格三栏。
+      t-row 是 flex 容器，t-col 默认 align-items:stretch，所以给行一个确定高度，
+      三列就等高铺满，各自内部独立滚动（面板根元素是 h-full）。
+      列宽：md 4/5/3，lg 起 3/6/3（作品库是主战场，多留空间）。
+    -->
+    <main v-if="isDesktop" class="flex-1 min-h-0 overflow-hidden flex">
+      <TRow class="flex-1 min-h-0 w-full" :gutter="0">
+        <TCol :xs="12" :md="4" :lg="3" class="h-full">
+          <CreatePanel
+            :is-submitting="flowRunning"
+            :expand-prompt="handleExpand"
+            :quota="quota"
+            @submit="handleCreate"
+          />
+        </TCol>
+        <TCol :xs="12" :md="5" :lg="6" class="h-full">
+          <LibraryPanel
+            :items="history"
+            :pending-items="pending"
+            :selected-id="selectedId"
+            :currently-playing-id="playingId ?? undefined"
+            :is-playing="isPlaying"
+            :loading="backend === 'checking'"
+            @select="selectSong"
+            @cancel="handleCancelPending"
+            @toggle-play="handleCardTogglePlay"
+            @download="handleDownload"
+          />
+        </TCol>
+        <TCol :xs="12" :md="3" :lg="3" class="h-full">
+          <SongDetailPanel
+            v-if="selectedSong"
+            :song="selectedSong"
+            :lyric-items="lyricItems"
+            :active-lyric-index="activeLyricIndex"
+            :lyric-estimated="lyricEstimated"
+            :lyric-shift="lyricShift"
+            :lyric-aligning="lyricAligning"
+            @close="handleCloseDetail"
+            @download="handleDownload(selectedSong)"
+            @seek-lyric="handleLyricSeek"
+            @shift-lyric="adjustLyricShift"
+            @toggle-align="toggleLyricAlign"
+            @align-lyric="handleLyricAlign"
+          />
+          <!-- 右栏空态：列本身保留，避免选中/取消时整块布局跳动 -->
+          <div v-else class="h-full bg-surface border-l border-line flex flex-col items-center justify-center gap-2 text-subtle">
+            <MusicIcon size="26px" class="opacity-50" />
+            <p class="text-xs">选中一首作品查看详情</p>
+          </div>
+        </TCol>
+      </TRow>
     </main>
+
+    <!--
+      窄屏（< 992px）：三栏塞不下，改为单栏 + 顶部分段切换。
+      v-if / v-else 与宽屏那套互斥，保证作品库卡片的 id="song-xxx" 全局唯一
+      （showLibrary 的 scrollIntoView 依赖它）。
+    -->
+    <main v-else class="flex-1 min-h-0 flex flex-col overflow-hidden">
+      <nav class="flex-shrink-0 px-3 py-2 bg-surface border-b border-line z-20">
+        <TRadioGroup v-model="mobileView" theme="button" variant="default-filled" class="ace-segment">
+          <TRadioButton value="create" class="ace-segment-item">创作</TRadioButton>
+          <TRadioButton value="library" class="ace-segment-item">
+            作品库<template v-if="history.length">（{{ history.length }}）</template>
+          </TRadioButton>
+          <TRadioButton value="detail" class="ace-segment-item" :disabled="!selectedSong">详情</TRadioButton>
+        </TRadioGroup>
+      </nav>
+
+      <div class="flex-1 min-h-0">
+        <CreatePanel
+          v-if="mobileView === 'create'"
+          :is-submitting="flowRunning"
+          :expand-prompt="handleExpand"
+          :quota="quota"
+          @submit="handleCreate"
+        />
+        <LibraryPanel
+          v-else-if="mobileView === 'library'"
+          :items="history"
+          :pending-items="pending"
+          :selected-id="selectedId"
+          :currently-playing-id="playingId ?? undefined"
+          :is-playing="isPlaying"
+          :loading="backend === 'checking'"
+          @select="selectSong"
+          @cancel="handleCancelPending"
+          @toggle-play="handleCardTogglePlay"
+          @download="handleDownload"
+        />
+        <SongDetailPanel
+          v-else-if="selectedSong"
+          :song="selectedSong"
+          :lyric-items="lyricItems"
+          :active-lyric-index="activeLyricIndex"
+          :lyric-estimated="lyricEstimated"
+          :lyric-shift="lyricShift"
+          :lyric-aligning="lyricAligning"
+          @close="handleCloseDetail"
+          @download="handleDownload(selectedSong)"
+          @seek-lyric="handleLyricSeek"
+          @shift-lyric="adjustLyricShift"
+          @toggle-align="toggleLyricAlign"
+          @align-lyric="handleLyricAlign"
+        />
+        <div v-else class="h-full flex flex-col items-center justify-center gap-2 text-subtle">
+          <MusicIcon size="26px" class="opacity-50" />
+          <p class="text-xs">还没有选中作品</p>
+          <p class="text-[11px] opacity-70">去「作品库」点一首，这里会显示歌词与详情</p>
+        </div>
+      </div>
+    </main>
+
 
     <PlaybackBar
       v-if="playerVisible"

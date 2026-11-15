@@ -133,16 +133,20 @@ watch(
 </script>
 
 <template>
-  <section class="ace-scroll flex-1 overflow-y-auto bg-canvas">
-    <div class="px-6 py-5">
-      <div class="flex items-center justify-between mb-4">
-        <div>
+  <!--
+    宽度由外层 t-col 决定；h-full 让列表在列内独立滚动，
+    而不是把整页撑高（窄屏单栏时页面本身不滚动，滚的是这一块）。
+  -->
+  <section class="ace-scroll h-full w-full overflow-y-auto bg-canvas">
+    <div class="px-4 md:px-6 py-4 md:py-5">
+      <div class="flex items-center justify-between gap-2 mb-4">
+        <div class="min-w-0">
           <h2 class="text-lg font-semibold">作品库</h2>
-          <p class="text-xs text-subtle mt-0.5">作品由服务器定时清理，请及时下载保存</p>
+          <p class="text-xs text-subtle mt-0.5 hidden md:block">作品由服务器定时清理，请及时下载保存</p>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 flex-shrink-0">
           <TTag variant="light" theme="primary">共 {{ items.length + pendingItems.length }} 首</TTag>
-          <span class="text-xs text-subtle">自动刷新</span>
+          <span class="text-xs text-subtle hidden md:inline">自动刷新</span>
         </div>
       </div>
 
@@ -226,9 +230,13 @@ watch(
                 <span class="ace-eq text-white" style="height: 26px" aria-hidden="true"><i /><i /><i /><i /><i /></span>
                 <span class="text-[9px] text-white/80 tracking-wide">生成中</span>
               </div>
+              <!--
+                播放遮罩：桌面端 hover 才浮现；触屏没有 hover，
+                窄屏下必须常驻显示，否则手机上根本没法从这里起播。
+              -->
               <button
                 v-else-if="item.audio_url"
-                class="absolute inset-0 flex items-center justify-center bg-black/35 opacity-0 group-hover:opacity-100 transition"
+                class="absolute inset-0 flex items-center justify-center bg-black/35 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition"
                 :aria-label="currentlyPlayingId === item.id && isPlaying ? '暂停' : '播放'"
                 @click.stop="emit('togglePlay', item)"
               >
@@ -307,7 +315,7 @@ watch(
         >
           <span class="ace-eq text-brand-400" style="height: 20px" aria-hidden="true"><i /><i /><i /><i /><i /></span>
           <p class="text-sm font-medium mt-3">还没有作品</p>
-          <p class="text-xs text-subtle mt-2">在左侧描述你的想法，点击「开始生成」</p>
+          <p class="text-xs text-subtle mt-2">在<span class="hidden md:inline">左侧</span>「创作」里描述你的想法，点击「开始生成」</p>
         </div>
       </div>
     </div>

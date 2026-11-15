@@ -75,27 +75,29 @@ function shiftText(value: number): string {
 </script>
 
 <template>
-  <aside class="ace-scroll w-[340px] min-w-[300px] overflow-y-auto bg-surface border-l border-line flex flex-col shadow-panel z-10">
-    <div class="px-5 py-4 border-b border-line flex items-start justify-between gap-2">
+  <!-- 宽度由外层 t-col 决定（窄屏是整宽单栏），h-full 让内容在面板内滚动 -->
+  <aside class="ace-scroll h-full w-full overflow-y-auto bg-surface border-l border-line flex flex-col shadow-panel z-10">
+    <div class="px-4 md:px-5 py-3 md:py-4 border-b border-line flex items-start justify-between gap-2 flex-shrink-0 sticky top-0 bg-surface z-10">
       <div class="min-w-0">
         <h2 class="text-base font-semibold truncate">{{ song.title || "未命名作品" }}</h2>
-        <div class="flex items-center gap-1.5 mt-2">
+        <div class="flex items-center gap-1.5 mt-2 flex-wrap">
           <TTag size="small" variant="light" :theme="statusTheme(song.status)">
             {{ statusText[song.status] || song.status }}
           </TTag>
           <TTag size="small" variant="light">{{ taskTypeText[song.task_type] || "文生音乐" }}</TTag>
         </div>
       </div>
-      <TButton size="small" variant="text" shape="square" @click="emit('close')">
+      <TButton size="small" variant="text" shape="square" title="关闭详情" @click="emit('close')">
         <CloseIcon />
       </TButton>
     </div>
 
-    <div class="px-5 py-4 space-y-3.5">
-      <!-- 概览：小封面 + 关键元信息。刻意压缩高度，把首屏空间让给歌词 -->
+    <div class="px-4 md:px-5 py-4 space-y-3.5">
+      <!-- 概览：小封面 + 关键元信息。刻意压缩高度，把首屏空间让给歌词。
+           封面在窄栏（md 断点下详情列约 250px）缩到 72px，给右侧文字多留位置。 -->
       <div class="flex gap-3">
         <div
-          class="relative w-[88px] h-[88px] rounded-xl overflow-hidden flex-shrink-0 flex items-center justify-center ace-cover"
+          class="relative w-[72px] h-[72px] lg:w-[88px] lg:h-[88px] rounded-xl overflow-hidden flex-shrink-0 flex items-center justify-center ace-cover"
           :style="{ backgroundImage: coverGradient(song.id) }"
         >
           <img
@@ -153,9 +155,10 @@ function shiftText(value: number): string {
         />
 
         <footer v-if="lyricItems.length" class="px-3 py-1.5 border-t border-line">
-          <div class="flex items-center justify-between gap-2">
+          <!-- 窄栏（md 断点下详情列只有 ~250px）下这几个按钮必须允许换行，否则会溢出 -->
+          <div class="flex items-center justify-between gap-2 flex-wrap">
             <span class="text-[10px] text-subtle whitespace-nowrap">同步不准？</span>
-            <div class="flex items-center gap-0.5">
+            <div class="flex items-center gap-0.5 flex-wrap justify-end">
               <TButton size="small" variant="text" title="歌词提前 0.3 秒" @click="emit('shiftLyric', 0.3)">
                 提前
               </TButton>

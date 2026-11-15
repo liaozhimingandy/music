@@ -24,7 +24,9 @@ const discIcon = computed(() => getCoverIcon(props.song?.cover_icon || paletteFo
 </script>
 
 <template>
-  <div class="fixed bottom-5 right-5 z-40 flex items-center gap-2.5 pl-2.5 pr-1.5 py-1.5 rounded-full bg-surface border border-line shadow-pop">
+  <div
+    class="fixed bottom-4 right-4 md:bottom-5 md:right-5 z-40 flex items-center gap-2.5 pl-2.5 pr-1.5 py-1.5 rounded-full bg-surface border border-line shadow-pop max-w-[calc(100vw-2rem)]"
+  >
     <div class="netease-disc w-9 h-9" :class="{ 'is-playing': isPlaying }">
       <div class="netease-disc-center" :style="{ backgroundImage: coverGradient(song?.id || 'empty') }">
         <img
