@@ -16,7 +16,7 @@
 #   traefik.enable=true                让 Traefik 接管本服务
 #   traefik.http.routers.music-studio.rule=Host(...)   按域名匹配
 #   traefik.http.services.music-studio.loadbalancer.server.port=8788
-#                                        后端容器内固定监听端口（与 MUSIC_STUDIO_PORT 一致）
+#                                        后端容器内监听端口（与上面的 PORT 一致）
 # 健康检查探 /v1/health，不健康就不转发流量。
 
 name: music-studio-backend
@@ -29,21 +29,25 @@ x-logging: &default-logging
 
 services:
   backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
     # 本地构建用独立变量名，避免被意外打上远端 tag。
-    image: ${LOCAL_BACKEND_IMAGE:-music-studio/backend:local}
+    image: registry.cn-hangzhou.aliyuncs.com/liaozhiming/music-studio-backend:sha-f14940b
+    container_name: prod-oa-music-01
     restart: unless-stopped
     # 读取同级 .env（默认当前目录 ./.env；位置不同用 ENV_FILE 覆盖）。
     # required:false 保证缺 .env 也能起（走 mock / 缺密钥状态，便于先验证镜像）。
+    # 宿主机端口 -> 容器端口。
+    # 宿主机侧不要再用 8000：本地前端 dev/preview 已占用 8000（实测 127.0.0.1:8000
+    # 返回的是 Vite 页面），同端口会让 Docker 与前端互相抢占，表现为「时好时坏」。
+    ports:
+      - 18788:8788
     env_file:
-      - path: ${ENV_FILE:-.env}
-        required: false
+      - .env
     environment:
       # 以下为容器内固定路径 / 端口 / 代理配置，不来自 .env：
       MUSIC_STUDIO_DATA_DIR: /app/data
-      MUSIC_STUDIO_PORT: "8788"
+      # 容器内监听端口：与下面 Traefik 的 server.port 标签必须一致。
+      # 改端口要同时改这两处（否则 Traefik 转发到没人监听的端口，502）。
+      PORT: "8788"
       MUSIC_STUDIO_TRUST_PROXY: "true"   # 经 Traefik 反代，开启以按真实 IP 限流
       MUSIC_STUDIO_MOCK: ${MUSIC_STUDIO_MOCK:-false}
     volumes:
@@ -52,30 +56,27 @@ services:
     networks:
       - proxy
     labels:
-      - traefik.enable=true
-      # 路由规则：按域名匹配。本地测试用 music.localhost；上云改成你的域名。
-      - traefik.http.routers.music-studio.rule=Host(`${BACKEND_DOMAIN:-music.localhost}`)
-      - traefik.http.routers.music-studio.entrypoints=web
-      # 开启 HTTPS 时改用下面两行（并确认 Traefik 已配置 websecure + 证书解析器 le）：
-      # - traefik.http.routers.music-studio.entrypoints=websecure
-      # - traefik.http.routers.music-studio.tls.certresolver=le
-      - traefik.http.routers.music-studio.service=music-studio
-      # 后端容器内固定监听 8788，Traefik 把流量转给这个端口。
-      - traefik.http.services.music-studio.loadbalancer.server.port=8788
-      # 健康检查探 /v1/health，不健康就不转发流量。
-      - traefik.http.services.music-studio.loadbalancer.healthcheck.path=/v1/health
-      - traefik.http.services.music-studio.loadbalancer.healthcheck.interval=10s
-      - traefik.http.services.music-studio.loadbalancer.healthcheck.timeout=5s
-    # 调试用：想直连容器（绕过 Traefik）时取消注释；正常走 Traefik 不需要。
-    # ports:
-    #   - "127.0.0.1:8788:8788"
+      - "traefik.enable=true"
+      - "traefik.http.routers.fastapi-tools.rule=Host(`apit-tools.alsoapp.com`)"
+      - "traefik.http.routers.fastapi-tools.entrypoints=websecure"
+      - "traefik.http.routers.fastapi-tools.tls=true"
+      - "traefik.http.routers.fastapi-tools.tls.certresolver=letsencrypt"
+      # 必须是**容器内**实际监听的端口（= 上面 environment 里的 PORT，即 8788），
+      # 不是宿主机映射出去的端口。写错会导致 Traefik 转发到无人监听的端口 → 502。
+      - "traefik.http.services.fastapi-tools.loadbalancer.server.port=8788"
+      # 告诉 Traefik 用哪个 Docker 网络访问本容器，要与下面 networks 里的实际网络名一致。
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik}"
     logging: *default-logging
 
 volumes:
   music-data:
 
 # 复用已存在的 proxy 网络（Traefik 所在网络），不在本文件创建新网络。
+# 复用 Traefik 所在网络。显式给 name（不加 compose 项目名前缀），网络名稳定可预期，
+# 并与上面 traefik.docker.network 标签保持一致。
+#   生产：该网络通常由 Traefik 先创建，此时应改为 external: true 直接复用，
+#         并用 TRAEFIK_NETWORK 指定真实网络名（例如 traefik）。
 networks:
   proxy:
-    external: true
-    name: ${TRAEFIK_NETWORK:-proxy}
+    name: ${TRAEFIK_NETWORK:-traefik}
+    # external: true
