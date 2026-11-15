@@ -27,6 +27,44 @@ PROJECT_ROOT = BACKEND_DIR.parent                 # 仓库根
 ENV_FILES = tuple(str(path) for path in (APP_DIR / ".env", BACKEND_DIR / ".env", PROJECT_ROOT / ".env"))
 
 
+def ca_cert_candidates(raw: str | None) -> list[Path]:
+    """把 ``LLM_CA_CERT`` 的原始值展开成「按优先级排列」的候选路径。
+
+    为什么要这么麻烦：``.env`` 里写 ``.\\root.crt`` 在 Windows 控制台看起来
+    没问题，但它的解析结果**取决于进程的 CWD**——用 ``uvicorn app.main:app``
+    从仓库根启动时，``.\\root.crt`` 指向仓库根，而证书其实在 ``backend/app/``
+    下；跑到 Linux 容器里反斜杠更会变成文件名字符的一部分，于是 httpx 报
+    「找不到证书」。所以这里统一做三件事：
+
+    1. 去引号 / 去首尾空白（``.env`` 里带引号是常见写法）；
+    2. 把 ``\\`` 统一换成正斜杠，Windows 风格路径在任何平台都能接受；
+    3. 相对路径依次尝试 **app 目录 → backend 目录 → 仓库根 → 进程 CWD**。
+
+    绝对路径只返回自身，交给调用方判断存在性。
+    """
+    text = (raw or "").strip().strip('"').strip("'").strip()
+    if not text:
+        return []
+    normalized = text.replace("\\", "/")
+    path = Path(normalized).expanduser()
+    if path.is_absolute():
+        return [path]
+    return [APP_DIR / normalized, BACKEND_DIR / normalized, PROJECT_ROOT / normalized, Path.cwd() / normalized]
+
+
+def resolve_ca_cert(raw: str | None) -> Path | None:
+    """返回第一个真实存在的 CA 证书文件；一个都不存在时返回 None（回退系统校验）。"""
+    for candidate in ca_cert_candidates(raw):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def cert_search_hint(raw: str | None) -> str:
+    """把候选路径拼成一行提示，供启动时的告警日志直接打印。"""
+    return "、".join(str(item) for item in ca_cert_candidates(raw)) or "（未配置）"
+
+
 class Settings(BaseSettings):
     """所有运行期开关；字段即配置项，缺省值保证「零配置也能跑离线演示」。"""
 
@@ -38,7 +76,18 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "Music Studio"
-    debug: bool = False
+    # DEBUG 开关同时决定三件事（见 logging_setup.py）：
+    #   1) 日志级别：true -> DEBUG（含请求体摘要、模型返回内容前若干字），false -> INFO；
+    #   2) 异常堆栈是否带局部变量（backtrace / diagnose，可能含密钥，生产别开）；
+    #   3) FastAPI 的 debug 模式（错误响应里带堆栈）。
+    # 环境变量名就是 DEBUG，值接受 true/false/1/0/yes/no（大小写不限）。
+    debug: bool = Field(default=False, validation_alias=AliasChoices("DEBUG", "MUSIC_STUDIO_DEBUG"))
+
+    # 日志落盘（loguru）：默认写 <data_dir>/logs/music-studio-YYYY-MM-DD.log，
+    # 每天零点轮转、只保留最近 N 天。容器部署挂载数据卷即随数据一起持久化。
+    log_file_enabled: bool = Field(default=True, validation_alias="MUSIC_STUDIO_LOG_FILE")
+    log_retention_days: int = Field(default=7, ge=1, validation_alias="MUSIC_STUDIO_LOG_RETENTION_DAYS")
+    log_dir_override: Path | None = Field(default=None, validation_alias="MUSIC_STUDIO_LOG_DIR")
 
     # 网络（沿用旧启动脚本的 ACE_STEP_* 变量名，避免破坏 scripts/start.bat）
     host: str = Field(
@@ -117,6 +166,17 @@ class Settings(BaseSettings):
     rate_limit_create: int = Field(default=5, ge=1, validation_alias="MUSIC_STUDIO_RATE_LIMIT_CREATE")
     max_active_jobs: int = Field(default=4, ge=1, validation_alias="MUSIC_STUDIO_MAX_ACTIVE_JOBS")
     max_active_jobs_per_client: int = Field(default=2, ge=1, validation_alias="MUSIC_STUDIO_MAX_ACTIVE_PER_CLIENT")
+    # 每日生成配额（成本闸门）：每次生成都会真实消耗 LLM 与音乐生成额度，
+    # 公开演示环境需要一个「总量上限」兜底。0 表示不限制。
+    # 计数口径见 services/quota.py：按 songs 表的创建时间落在「自然日」内统计，
+    # 日界默认东八区（daily_reset_utc_offset=8），服务器跑 UTC 也不会错位。
+    # 与 max_active_jobs 的区别：那个限制「同时跑几个」，这个限制「一天跑几首」。
+    daily_generation_limit: int = Field(
+        default=50, ge=0, validation_alias="MUSIC_STUDIO_DAILY_LIMIT"
+    )
+    daily_reset_utc_offset: float = Field(
+        default=8.0, ge=-12, le=14, validation_alias="MUSIC_STUDIO_DAILY_RESET_UTC_OFFSET"
+    )
     dedupe_window_seconds: int = Field(default=30, ge=0, validation_alias="MUSIC_STUDIO_DEDUPE_WINDOW")
     max_request_bytes: int = Field(default=64 * 1024, ge=1024, validation_alias="MUSIC_STUDIO_MAX_REQUEST_BYTES")
     # 默认不信任 X-Forwarded-For（可伪造）；只有部署在可信反向代理后才开启。
@@ -132,6 +192,28 @@ class Settings(BaseSettings):
     max_recovery_attempts: int = Field(
         default=5, ge=0, validation_alias="MUSIC_STUDIO_MAX_RECOVERY_ATTEMPTS"
     )
+    # 断点续跑：阶段产物 JSON 存在即跳过该阶段（进程重启后接着跑的关键）。
+    # 例外场景是「换了 LLM 模型想重跑」：旧产物不会重生成，歌曲听起来还是老模型的。
+    # 想强制用当前模型重跑，把 MUSIC_STUDIO_RESUME 设为 false 即可（产物会被覆盖，
+    # 队列里的任务也会从头再跑一遍，音乐与 LLM 额度都会重新消耗）。
+    resume_enabled: bool = Field(default=True, validation_alias="MUSIC_STUDIO_RESUME")
+
+    @property
+    def logs_dir(self) -> Path:
+        """日志目录：``MUSIC_STUDIO_LOG_DIR`` 优先，否则 ``<data_dir>/logs``。"""
+        if self.log_dir_override is not None:
+            return self.resolve(self.log_dir_override)
+        return self.resolve(self.data_dir) / "logs"
+
+    @property
+    def llm_ca_cert_path(self) -> Path | None:
+        """解析后的 CA 证书绝对路径；未配置或文件不存在时为 None。
+
+        LLMClient 用它构造 ``httpx`` 的 ``verify`` 参数。**不要**在别处直接
+        用 ``settings.llm_ca_cert`` 当路径——那是 .env 里的原始字符串，
+        相对路径的含义随启动目录变化。
+        """
+        return resolve_ca_cert(self.llm_ca_cert)
 
     @property
     def db_path(self) -> Path:
@@ -148,8 +230,8 @@ class Settings(BaseSettings):
         return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
     def ensure_directories(self) -> None:
-        """确保数据目录与产物目录存在，避免首次启动时写库失败。"""
-        for directory in (self.resolve(self.data_dir), self.resolve(self.outputs_dir)):
+        """确保数据目录、产物目录与日志目录存在，避免首次启动时写库/写日志失败。"""
+        for directory in (self.resolve(self.data_dir), self.resolve(self.outputs_dir), self.logs_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
 

@@ -27,21 +27,27 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .dal import close_connection, init_schema
+from .logging_setup import log_startup_summary, setup_logging
 from .middleware import UnhandledErrorMiddleware
 from .routers import api_v1
 from .services import runtime
 
-logging.basicConfig(
-    level=logging.INFO if not settings.debug else logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# 日志必须在 app 创建前配置好：uvicorn 导入本模块时就会打启动日志。
+# 级别由 DEBUG 决定（true -> DEBUG，否则 INFO），文件按天轮转保留 7 天，
+# 细节见 logging_setup.py。注意这里不要再用 logging.basicConfig，
+# 否则会和 loguru 的 sink 重复输出。
+LOG_DIR = setup_logging()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001 - FastAPI 约定的签名
     """启动建表、恢复队列、关闭清理；TestClient 进入 with 时也会走这里。"""
     await init_schema()
-    logging.getLogger(__name__).info("SQLite 数据库就绪：%s", settings.db_path)
+    # 第一行就打「进程内真实生效的配置」，排查「改了 .env 没生效」先看它。
+    log_startup_summary()
+    logger.info("SQLite 数据库就绪：%s", settings.db_path)
+    logger.info("日志落盘目录：%s（保留 %s 天）", LOG_DIR or "已禁用", settings.log_retention_days)
     await runtime.start_queue_worker()
     yield
     # 先停巡检 / 取消后台任务（保留 DB 状态供下次重启续跑），最后才关连接。
@@ -63,6 +69,16 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # 跨域时浏览器默认只把「简单响应头」暴露给 JS，自定义头必须显式放行：
+    # 前端要在创作面板显示「今日还剩 X 首」就要读 X-Daily-Remaining，
+    # 幂等去重标记 X-Deduplicated 也一样（同源部署无此限制，dev 直连才有）。
+    expose_headers=[
+        "X-Daily-Limit",
+        "X-Daily-Remaining",
+        "X-Daily-Reset",
+        "X-Deduplicated",
+        "Retry-After",
+    ],
 )
 
 # 所有业务接口（含 /v1/health）都从 api_v1 聚合路由一次注册；版本前缀只在
