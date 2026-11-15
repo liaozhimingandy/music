@@ -1,24 +1,25 @@
 /**
- * 后端接口层：所有请求都走 services/index.ts 的 axios 实例。
- *
- * 启动时探测 GET /v1/history：拿到数组说明后端在线，走真实接口；
- * 否则进入演示模式，用 services/demo.ts 的本地数据兜底，
- * 保证本地预览与 GitHub Pages 静态托管时界面和生成流程仍可用。
- * 后端启动后刷新页面即自动切回真实接口。
+ * 后端接口层：所有请求都走 services/index.ts 的 axios 实例，只对接真实后端。
+ * 后端未启动时由页面状态栏提示「后端未连接」，不再有本地演示数据兜底。
  *
  * 接口版本：axios 的 baseURL 是 /v1（见 common/config.ts），apiUrls 只写
  * 不带版本号的相对路径；后端 constants.API_V1_PREFIX 是前缀的唯一来源。
  */
-import * as demo from "./demo";
-import { del, get, isConnectionError, post } from "./index";
-import type { GenerationCreate, GenerationResponse, LLMTaskRequest, LLMTaskResponse } from "@/interface";
+import { get, post } from "./index";
+import type {
+  GenerationCreate,
+  GenerationResponse,
+  HealthResponse,
+  LLMTaskRequest,
+  LLMTaskResponse,
+} from "@/interface";
 import { config } from "@/common/config";
 
 /** 接口地址集中管理（唯一来源）；/v1 前缀由 config.API_BASE_URL 提供 */
 export const apiUrls = {
+  health: () => "/health",
   history: () => "/history",
   generations: () => "/generations",
-  generation: (id: string) => `/generations/${id}`,
   audio: (id: string) => `/generations/${id}/audio`,
   llm: () => "/llm",
 };
@@ -30,7 +31,7 @@ export const apiUrls = {
  * * ``API_BASE_URL=/v1``（Vite 代理 / 同源反代）：原样返回即可命中代理；
  * * ``API_BASE_URL=http://host:8788/v1``（直连后端）：用 ``new URL`` 补上域名，
  *   否则浏览器会去前端站点找 /v1/... 而拿到 404；
- * * 演示数据的 blob: / data: / 外链 http(s) 地址：原样透传。
+ * * 外链 http(s) / 协议相对地址：原样透传（blob:/data: 仅为兼容保留）。
  */
 export function resolveAudioUrl(path: string): string {
   if (/^(?:https?:|blob:|data:|\/\/)/i.test(path)) return path;
@@ -40,83 +41,31 @@ export function resolveAudioUrl(path: string): string {
   return path;
 }
 
-/** 探测结果三态：unknown 未探测 / online 真实接口 / offline 演示模式 */
-type BackendState = "unknown" | "online" | "offline";
-let backendState: BackendState = "unknown";
-let probePromise: Promise<boolean> | null = null;
-
-/** 后端在线探测：只做一次，结果缓存 */
-async function probe(): Promise<boolean> {
-  if (backendState !== "unknown") return backendState === "online";
-  if (!probePromise) {
-    probePromise = (async () => {
-      try {
-        const data = await get<unknown>(apiUrls.history(), { timeout: config.PROBE_TIMEOUT, silent: true });
-        // GitHub Pages 会把 /v1/* 回退成 HTML，用 Array.isArray 判定可避免误判为在线
-        backendState = Array.isArray(data) ? "online" : "offline";
-      } catch {
-        backendState = "offline";
-      }
-      return backendState === "online";
-    })().finally(() => {
-      probePromise = null;
-    });
-  }
-  return probePromise;
+/**
+ * GET /v1/history —— 作品列表，前端每 POLL_INTERVAL 轮询。
+ * silent: true 避免后端短暂掉线时错误提示刷屏；连接状态由页面状态栏展示。
+ */
+export function listHistory(): Promise<GenerationResponse[]> {
+  return get<GenerationResponse[]>(apiUrls.history(), { silent: true });
 }
 
 /**
- * 统一调用入口：后端在线走真实请求；请求过程中后端掉线则转成演示模式。
- * 业务错误（4xx 等）原样抛出，只有连接类错误才降级。
+ * GET /v1/health —— 连接状态 + 今日生成配额。
+ *
+ * 配额字段（daily_limit / daily_remaining）由后端按自然日统计，前端只做展示：
+ * 上限为 0 表示不限额，此时 daily_remaining 是 null，UI 不显示剩余量。
+ * silent: true —— 探活失败不该弹全局错误（顶栏已有「后端未连接」状态）。
  */
-async function call<T>(request: () => Promise<T>, fallback: () => T | Promise<T>): Promise<T> {
-  if (!(await probe())) return fallback();
-  try {
-    return await request();
-  } catch (error) {
-    if (isConnectionError(error)) {
-      backendState = "offline";
-      return fallback();
-    }
-    throw error;
-  }
+export function fetchHealth(): Promise<HealthResponse> {
+  return get<HealthResponse>(apiUrls.health(), { silent: true });
 }
 
-/** 返回 true 表示处于演示模式（后端未连接） */
-export async function detectBackend(): Promise<boolean> {
-  return !(await probe());
-}
-
-/** GET /v1/history */
-export function listHistory(): Promise<GenerationResponse[]> {
-  return call(
-    () => get<GenerationResponse[]>(apiUrls.history(), { silent: true }),
-    () => demo.demoHistory(),
-  );
-}
-
-/** POST /v1/generations */
+/** POST /v1/generations：创建作品，立即返回 queued，后台跑五阶段 */
 export function createGeneration(payload: GenerationCreate): Promise<GenerationResponse> {
-  return call(
-    () => post<GenerationResponse>(apiUrls.generations(), payload, { silent: true }),
-    () => demo.demoCreate(payload),
-  );
+  return post<GenerationResponse>(apiUrls.generations(), payload);
 }
 
-/** DELETE /v1/generations/{id} */
-export function deleteGeneration(id: string): Promise<void> {
-  return call(
-    async () => {
-      await del<unknown>(apiUrls.generation(id), { silent: true });
-    },
-    () => demo.demoDelete(id),
-  );
-}
-
-/** POST /v1/llm */
+/** POST /v1/llm：AI 扩写描述 / 写词 / 起标题等用户主动触发的辅助任务 */
 export function runLLMTask(payload: LLMTaskRequest): Promise<LLMTaskResponse> {
-  return call(
-    () => post<LLMTaskResponse>(apiUrls.llm(), payload, { silent: true }),
-    () => demo.demoLLM(payload.task),
-  );
+  return post<LLMTaskResponse>(apiUrls.llm(), payload);
 }

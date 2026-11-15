@@ -11,7 +11,6 @@ import { Button as TButton, Tag as TTag } from "tdesign-vue-next";
 import {
   BackwardIcon,
   ChevronDownIcon,
-  DeleteIcon,
   DownloadIcon,
   ForwardIcon,
   HeartFilledIcon,
@@ -33,13 +32,14 @@ const props = defineProps<{
   volume: number;
   hasPrev: boolean;
   hasNext: boolean;
+  /** 当前正在唱的那句歌词；空字符串表示还没开始 / 没有歌词 */
+  activeLyric?: string;
 }>();
 
 const emit = defineEmits<{
   playPause: [];
   seek: [value: number];
   download: [];
-  delete: [];
   hide: [];
   prev: [];
   next: [];
@@ -74,10 +74,6 @@ function download() {
   emit("download");
   closeMenu();
 }
-function remove() {
-  if (window.confirm("确定永久删除这首作品吗？")) emit("delete");
-  closeMenu();
-}
 </script>
 
 <template>
@@ -104,13 +100,25 @@ function remove() {
         <p class="text-sm font-semibold truncate">
           {{ song ? truncateText(song.title || song.prompt, 24) : "准备就绪" }}
         </p>
-        <div class="flex items-center gap-2 mt-1.5">
+        <!-- 播放中优先显示正在唱的那句歌词（与右侧同步歌词同一时间轴），
+             没有歌词时回退到状态标签 + 类型说明 -->
+        <div class="flex items-center gap-2 mt-1.5 min-h-[20px]">
           <TTag v-if="song" size="small" variant="light" :theme="statusTheme(song.status)">
             {{ statusText[song.status] || song.status }}
           </TTag>
-          <span class="text-xs text-subtle truncate">
-            {{ song ? (song.instrumental ? "纯音乐 · AI 生成" : "AI 生成 · 华语") : "从作品库选择一首歌曲" }}
-          </span>
+          <Transition name="lyric-swap" mode="out-in">
+            <span
+              v-if="activeLyric"
+              :key="activeLyric"
+              class="text-xs text-brand-600 font-medium truncate"
+              :title="activeLyric"
+            >
+              {{ activeLyric }}
+            </span>
+            <span v-else key="meta" class="text-xs text-subtle truncate">
+              {{ song ? (song.instrumental ? "纯音乐 · AI 生成" : "AI 生成 · 华语") : "从作品库选择一首歌曲" }}
+            </span>
+          </Transition>
         </div>
       </div>
       <TButton
@@ -199,10 +207,31 @@ function remove() {
         <TButton v-if="song" block variant="text" size="small" :disabled="!song.audio_url" @click="download">
           <span class="inline-flex items-center gap-1"><DownloadIcon size="14px" />下载音频</span>
         </TButton>
-        <TButton v-if="song" block variant="text" size="small" theme="danger" @click="remove">
-          <span class="inline-flex items-center gap-1"><DeleteIcon size="14px" />删除作品</span>
-        </TButton>
       </div>
     </div>
   </footer>
 </template>
+
+<style scoped>
+/* 歌词行切换：轻微上移淡出 / 淡入，避免文本硬闪 */
+.lyric-swap-enter-active,
+.lyric-swap-leave-active {
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease;
+}
+.lyric-swap-enter-from {
+  opacity: 0;
+  transform: translateY(5px);
+}
+.lyric-swap-leave-to {
+  opacity: 0;
+  transform: translateY(-5px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .lyric-swap-enter-active,
+  .lyric-swap-leave-active {
+    transition: none;
+  }
+}
+</style>

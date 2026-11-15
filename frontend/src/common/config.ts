@@ -11,6 +11,4 @@ export const config = {
   POLL_INTERVAL: 2000,
   /** 普通请求超时（毫秒） */
   REQUEST_TIMEOUT: 8000,
-  /** 后端在线探测超时（毫秒），静态托管时应尽快失败 */
-  PROBE_TIMEOUT: 1200,
 } as const;

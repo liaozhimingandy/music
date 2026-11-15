@@ -7,8 +7,8 @@
  * 3. 响应拦截：直接返回 response.data；错误按状态码归一化并可选全局提示
  * 4. 暴露 get / post / del 三个类型化方法供 services/api.ts 使用
  *
- * 注意：后端可能未启动（本地预览 / GitHub Pages 静态托管），
- * 因此业务请求统一传 silent: true，由 api.ts 决定降级到演示数据，避免错误提示刷屏。
+ * 注意：作品列表等高频轮询请求统一传 silent: true，避免后端短暂掉线时
+ * 错误提示刷屏（连接状态由页面状态栏展示）；其余请求正常弹出全局提示。
  */
 import axios from "axios";
 import type { AxiosRequestConfig } from "axios";

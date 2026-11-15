@@ -5,9 +5,9 @@
  * - GenerationResponse 字段改名必须同步后端 GenerationResponse 与
  *   SongService.to_response()，否则作品库会渲染出 undefined。
  * - status 只用 queued / processing / ready / failed，文案映射在 common/utils.ts。
- * - key 对应数据库的 musical_key；audio_url 是 /v1/... 相对路径、blob 或外链 URL，
+ * - key 对应数据库的 musical_key；audio_url 是 /v1/... 相对路径或外链 URL，
  *   为空表示音频尚未生成，播放器会禁用播放按钮。
- * - metadata 是不定型扩展字段，离线演示模式把 _queuedAt 暂存在这里。
+ * - metadata 是不定型扩展字段，后端流程会把音乐方案摘要等暂存在这里。
  */
 
 export type TaskType = "text2music";
@@ -16,7 +16,7 @@ export type TaskType = "text2music";
  * （backend/app/config.py，默认 ACE-Step/acestep-v15-xl-sft），
  * 可通过 GET /v1/health 的 music_model 字段读取。
  * 提交时前端不传 model_variant，由 SongService 用配置回填；
- * 响应里还可能是历史演示数据 base / turbo / shift，所以放宽成 string。
+ * 响应里还可能是历史记录的 base / turbo / shift，所以放宽成 string。
  */
 export type ModelVariant = string;
 
@@ -60,6 +60,8 @@ export type GenerationResponse = {
   cover_image_url?: string | null;
   error_message?: string | null;
   metadata?: Record<string, unknown>;
+  /** 生成中时后端正在执行的阶段（planning / lyrics / polish / music_prompt / music_generation） */
+  current_stage?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -87,4 +89,22 @@ export type PendingGeneration = {
   stageLabels: string[];
   stageIndex: number;
   error?: string;
+};
+
+/**
+ * GET /v1/health 响应（对应后端 models/schemas.py 的 HealthResponse）。
+ *
+ * daily_limit = 0 表示不限额，此时 daily_remaining 为 null；
+ * 前端只在 remaining 是数字时显示「今日还剩 X 首」，不限额时不打扰用户。
+ */
+export type HealthResponse = {
+  status: string;
+  app: string;
+  mock_mode: boolean;
+  database: string;
+  music_model?: string | null;
+  daily_limit?: number | null;
+  daily_used?: number | null;
+  daily_remaining?: number | null;
+  daily_reset_at?: string | null;
 };
