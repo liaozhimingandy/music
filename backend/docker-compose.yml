@@ -1,25 +1,23 @@
-# 带 Traefik 反向代理的本地测试编排（一键起 Traefik + 后端）。
+# 单服务编排：仅后端。反向代理（Traefik）已在别处运行，本文件不重复部署。
 #
 # 用法：
 #   cd backend
-#   # 可选：建 .env 填 LLM_API_KEY、MUSIC_API_TOKEN；不想填就开 mock 模式
-#   MUSIC_STUDIO_MOCK=true docker compose up -d --build
-#   浏览器打开 http://music.localhost  （*.localhost 会被解析到 127.0.0.1）
+#   # .env 在外层（仓库根）时，env_file 默认就指向 ../.env，直接起即可：
+#   docker compose up -d --build
+#   # 若 .env 在别的路径，用 ENV_FILE 指过去（仍在 backend/ 就改成 ./.env）：
+#   ENV_FILE=../.env docker compose up -d --build
 #
-# 路由标签说明（核心）：
-#   traefik.enable=true                                 让 Traefik 接管本服务
-#   traefik.http.routers.music-studio.rule=Host(...)    按域名匹配
+# 接入已有 Traefik（关键两步）：
+#   1) 本服务通过 labels 暴露给 Traefik，必须和 Traefik 在同一 Docker 网络；
+#   2) 本文件复用名为 proxy 的已有网络（external），如果你的 Traefik 网络名不同，
+#      用 TRAEFIK_NETWORK 覆盖，例如：TRAEFIK_NETWORK=traefik_public docker compose up -d --build
+#
+# 路由标签（核心）：
+#   traefik.enable=true                让 Traefik 接管本服务
+#   traefik.http.routers.music-studio.rule=Host(...)   按域名匹配
 #   traefik.http.services.music-studio.loadbalancer.server.port=8788
-#                                                         后端实际监听端口（容器内固定 8788）
-#
-# 两种用法：
-# 1) 本文件自带 Traefik，直接 docker compose up 就能测（默认 HTTP）。
-# 2) 你已有在跑的 Traefik：删掉下面的 traefik 服务，把 backend 挂到已有网络
-#    （见文末「接入已有 Traefik」注释），标签保持不变即可被现有 Traefik 发现。
-#
-# 切 HTTPS（Let's Encrypt）：取消 traefik 服务里 entrypoints.websecure /
-# certificatesresolvers.le.* 那几行注释，并把 backend 的 router 标签改成
-# entrypoints=websecure + 加 tls.certresolver=le（文内已注释好）。
+#                                        后端容器内固定监听端口（与 MUSIC_STUDIO_PORT 一致）
+# 健康检查探 /v1/health，不健康就不转发流量。
 
 name: music-studio-backend
 
@@ -30,30 +28,6 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
-  traefik:
-    image: traefik:v3.3
-    container_name: music-traefik
-    command:
-      - --api.insecure=true            # 本地测试用：http://localhost:8080 看仪表盘
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false   # 只有打了 enable=true 标签的服务才接管
-      - --entrypoints.web.address=:80
-      # —— 以下取消注释即可开启 HTTPS（Let's Encrypt）——
-      # - --entrypoints.websecure.address=:443
-      # - --certificatesresolvers.le.acme.tlschallenge=true
-      # - --certificatesresolvers.le.acme.email=${ACME_EMAIL:-you@example.com}
-      # - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
-    ports:
-      - "80:80"
-      # - "443:443"
-      - "127.0.0.1:8080:8080"          # Traefik 仪表盘，仅本机
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      # - traefik-cert:/letsencrypt
-    networks:
-      - traefik
-    logging: *default-logging
-
   backend:
     build:
       context: .
@@ -61,27 +35,28 @@ services:
     # 本地构建用独立变量名，避免被意外打上远端 tag。
     image: ${LOCAL_BACKEND_IMAGE:-music-studio/backend:local}
     restart: unless-stopped
-    # 没有 .env 也能起（缺密钥状态 / mock 模式），方便先验证镜像。
+    # 读取外层 .env（默认仓库根 ../.env；位置不同用 ENV_FILE 覆盖）。
+    # required:false 保证缺 .env 也能起（走 mock / 缺密钥状态，便于先验证镜像）。
     env_file:
-      - path: .env
+      - path: ${ENV_FILE:-../.env}
         required: false
     environment:
+      # 以下为容器内固定路径 / 端口 / 代理配置，不来自 .env：
       MUSIC_STUDIO_DATA_DIR: /app/data
       MUSIC_STUDIO_PORT: "8788"
-      # 反代会写 X-Forwarded-For，开启后限流/单客户端并发按真实 IP 统计。
-      MUSIC_STUDIO_TRUST_PROXY: "true"
+      MUSIC_STUDIO_TRUST_PROXY: "true"   # 经 Traefik 反代，开启以按真实 IP 限流
       MUSIC_STUDIO_MOCK: ${MUSIC_STUDIO_MOCK:-false}
     volumes:
       # SQLite 库 + outputs 音频 + 阶段 JSON 全在这里，删卷 = 删全部作品。
       - music-data:/app/data
     networks:
-      - traefik
+      - proxy
     labels:
       - traefik.enable=true
       # 路由规则：按域名匹配。本地测试用 music.localhost；上云改成你的域名。
       - traefik.http.routers.music-studio.rule=Host(`${BACKEND_DOMAIN:-music.localhost}`)
       - traefik.http.routers.music-studio.entrypoints=web
-      # —— 开启 HTTPS 时改用下面两行（并打开 traefik 服务的 websecure/LE 注释）——
+      # 开启 HTTPS 时改用下面两行（并确认 Traefik 已配置 websecure + 证书解析器 le）：
       # - traefik.http.routers.music-studio.entrypoints=websecure
       # - traefik.http.routers.music-studio.tls.certresolver=le
       - traefik.http.routers.music-studio.service=music-studio
@@ -91,26 +66,16 @@ services:
       - traefik.http.services.music-studio.loadbalancer.healthcheck.path=/v1/health
       - traefik.http.services.music-studio.loadbalancer.healthcheck.interval=10s
       - traefik.http.services.music-studio.loadbalancer.healthcheck.timeout=5s
+    # 调试用：想直连容器（绕过 Traefik）时取消注释；正常走 Traefik 不需要。
+    # ports:
+    #   - "127.0.0.1:8788:8788"
     logging: *default-logging
 
 volumes:
   music-data:
-  # traefik-cert:
 
+# 复用已存在的 proxy 网络（Traefik 所在网络），不在本文件创建新网络。
 networks:
-  traefik:
-    name: music-studio-traefik
-
-# ———————————————————————————————————————————————
-# 接入已有 Traefik（不启本文件的 traefik 服务时）：
-#   1. 删掉上面的 traefik 服务及其 volumes/networks 条目；
-#   2. 把 backend 的 networks 改成你已有 Traefik 所在网络，例如：
-#        networks:
-#          - traefik   # 改成你现有的网络名，如 proxy / traefik_default
-#   3. 顶层 networks 删掉自定义定义，或改成 external：
-#        networks:
-#          traefik:
-#            external: true
-#            name: 你现有Traefik网络名
-#   其余 labels 原样保留即可。
-# ———————————————————————————————————————————————
+  proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK:-proxy}

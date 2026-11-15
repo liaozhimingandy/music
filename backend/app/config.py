@@ -1,7 +1,7 @@
 """运行期配置：集中读取环境变量，不在代码里硬编码任何密钥。
 
 优先级：环境变量 > backend/app/.env > backend/.env > 仓库根 .env > 默认值。
-``.env`` 已被 .gitignore 忽略，模板见 backend/app/.env.example。
+``.env`` 已被 .gitignore 忽略，模板见 backend/.env.example。
 文件按上面顺序全部加载，靠前的同名变量优先（pydantic-settings 行为）。
 
 维护提示
