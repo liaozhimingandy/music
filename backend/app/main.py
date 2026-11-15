@@ -1,6 +1,6 @@
 """Music Studio FastAPI 入口。
 
-启动：``uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8788``
+启动：``python run.py``（在 backend/ 目录下执行；绑定地址读 .env 的 HOST/PORT）
 分层：``routers -> service -> dal -> model``（SQLite3）。
 
 应用生命周期（async lifespan）：

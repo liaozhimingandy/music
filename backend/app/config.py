@@ -89,12 +89,16 @@ class Settings(BaseSettings):
     log_retention_days: int = Field(default=7, ge=1, validation_alias="MUSIC_STUDIO_LOG_RETENTION_DAYS")
     log_dir_override: Path | None = Field(default=None, validation_alias="MUSIC_STUDIO_LOG_DIR")
 
-    # 网络（沿用旧启动脚本的 ACE_STEP_* 变量名，避免破坏 scripts/start.bat）
+    # 网络：HOST / PORT 为主变量名（.env 里直接写 HOST= / PORT= 即可生效），
+    # 兼容旧启动脚本的 ACE_STEP_HOST/PORT 与 MUSIC_STUDIO_HOST/PORT 别名。
+    # 绑定地址由 run.py（统一启动入口）读取本字段后启动 uvicorn；
+    # 以前 Dockerfile / 启动脚本里写死了 --host 0.0.0.0 --port 8788，
+    # 改 .env 不生效，现在统一走 settings。
     host: str = Field(
         default="0.0.0.0",
-        validation_alias=AliasChoices("ACE_STEP_HOST", "MUSIC_STUDIO_HOST"),
+        validation_alias=AliasChoices("HOST", "MUSIC_STUDIO_HOST", "ACE_STEP_HOST"),
     )
-    port: int = Field(default=8788, validation_alias=AliasChoices("ACE_STEP_PORT", "MUSIC_STUDIO_PORT"))
+    port: int = Field(default=8788, validation_alias=AliasChoices("PORT", "MUSIC_STUDIO_PORT", "ACE_STEP_PORT"))
     # 跨域：前端 dev 直连后端（例如 http://127.0.0.1:5177 -> http://localhost:8000）
     # 是不同源，必须放行。默认允许**任意端口的本机回环来源**，省得每换一个
     # 端口就改配置；生产用 CORS_ORIGINS 显式列出域名，逗号分隔或 JSON 数组均可。

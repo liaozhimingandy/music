@@ -53,9 +53,11 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# 只拷 app 包：tests / .venv / .env 由 .dockerignore 挡在构建上下文外。
+# 只拷 app 包 + 统一启动入口 run.py（tests / .venv / .env 由 .dockerignore 挡在构建上下文外）。
 # prompts/ 与 root.crt 都在 app 目录里，跟着一起进镜像（提示词是运行必需）。
 COPY app ./app
+# run.py 负责读 .env 的 HOST/PORT 再启动 uvicorn，绑定地址不再写死。
+COPY run.py ./run.py
 
 # 非 root 运行：先建用户，再把数据目录给它（命名卷首次创建时会继承该属主）。
 # 若改用 bind mount（./data:/app/data），宿主机目录必须先
@@ -72,10 +74,12 @@ EXPOSE 8788
 
 # 探针打 /v1/health：不挂限流、不碰 LLM，能真实反映「进程活着且库能打开」。
 # start-period 给 20 秒，首次建表 + 补列留足时间。
+# 端口与实际监听保持一致：PORT 优先，其次 MUSIC_STUDIO_PORT（默认值 8788）。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS "http://127.0.0.1:${MUSIC_STUDIO_PORT}/v1/health" || exit 1
+    CMD curl -fsS "http://127.0.0.1:${PORT:-${MUSIC_STUDIO_PORT:-8788}}/v1/health" || exit 1
 
-# exec 让 uvicorn 接管 PID 1，docker stop 的 SIGTERM 能直接到达应用，
+# exec 让 run.py 接管 PID 1，docker stop 的 SIGTERM 能直接到达应用，
 # 从而走 lifespan 的优雅关闭（停巡检、cancel 任务、关数据库）。
-# 端口读环境变量，保持与 backend/app/config.py 的 MUSIC_STUDIO_PORT 一致。
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port \"${MUSIC_STUDIO_PORT:-8788}\" --no-server-header"]
+# 绑定地址由 run.py 读 .env 的 HOST/PORT 决定（默认 0.0.0.0:8788），
+# 与 backend/app/config.py 的 HOST / PORT 别名一致。
+CMD ["sh", "-c", "exec python run.py"]

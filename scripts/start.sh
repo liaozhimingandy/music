@@ -1,11 +1,37 @@
 #!/usr/bin/env bash
-# 同时启动后端（uv run uvicorn）与前端（vite dev）；Ctrl+C 一起退出。
+# 同时启动后端（run.py）与前端（vite dev）；Ctrl+C 一起退出。
 # 首次运行前先执行 scripts/install_mac.sh（或手工 uv sync --project backend）。
+#
+# 后端绑定地址由 backend/.env 的 HOST / PORT 决定（缺省 0.0.0.0:8788），
+# 由 backend/run.py 读 settings 后启动 uvicorn。本脚本**不再**传 --host/--port，
+# 否则命令行参数会盖掉 .env 的配置（这正是「改了 .env 没效果」的根因）。
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BACKEND_PORT=${ACE_STEP_PORT:-8788}
 FRONTEND_PORT=${ACE_STEP_UI_PORT:-5175}
-HOST=${ACE_STEP_HOST:-0.0.0.0}
+
+# 从 backend/.env 读一个键，仅用于回显提示；后端真实取值由 pydantic 决定。
+env_value() {
+  local key=$1 file="$ROOT_DIR/backend/.env" line=""
+  [ -f "$file" ] || return 0
+  line=$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | tail -n 1) || line=""
+  line=${line#*=}
+  line=${line%$'\r'}
+  line=${line%\"}; line=${line#\"}; line=${line%\'}; line=${line#\'}
+  printf '%s' "$line"
+}
+
+BACKEND_HOST=$(env_value HOST)
+[ -n "$BACKEND_HOST" ] || BACKEND_HOST=$(env_value MUSIC_STUDIO_HOST)
+[ -n "$BACKEND_HOST" ] || BACKEND_HOST=$(env_value ACE_STEP_HOST)
+BACKEND_HOST=${BACKEND_HOST:-0.0.0.0}
+
+BACKEND_PORT=$(env_value PORT)
+[ -n "$BACKEND_PORT" ] || BACKEND_PORT=$(env_value MUSIC_STUDIO_PORT)
+[ -n "$BACKEND_PORT" ] || BACKEND_PORT=$(env_value ACE_STEP_PORT)
+BACKEND_PORT=${BACKEND_PORT:-8788}
+
+# 前端 dev server 的绑定地址与后端无关，独立变量。
+FRONTEND_HOST=${FRONTEND_HOST:-0.0.0.0}
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "未找到 uv，请先安装：curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
@@ -20,17 +46,17 @@ fi
 trap 'kill 0' SIGINT SIGTERM EXIT
 
 # uv run 会复用 backend/.venv，不需要手动 activate / 设 PYTHONPATH：
-# --app-dir 已经把 backend 加进 sys.path。
-uv run --project "$ROOT_DIR/backend" \
-  uvicorn app.main:app --app-dir "$ROOT_DIR/backend" --host "$HOST" --port "$BACKEND_PORT" &
+# run.py 所在目录会自动进 sys.path，app 包可直接 import。
+# 绑定地址交给 run.py 从 .env 读，这里不传 --host/--port。
+uv run --project "$ROOT_DIR/backend" python "$ROOT_DIR/backend/run.py" &
 BACKEND_PID=$!
 
-echo "Backend running (PID $BACKEND_PID) on $HOST:$BACKEND_PORT"
+echo "Backend running (PID $BACKEND_PID) on $BACKEND_HOST:$BACKEND_PORT"
 
 cd "$ROOT_DIR/frontend"
-npm run dev -- --host "$HOST" --port "$FRONTEND_PORT" &
+npm run dev -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" &
 FRONTEND_PID=$!
 
-echo "Frontend running (PID $FRONTEND_PID) on $HOST:$FRONTEND_PORT"
+echo "Frontend running (PID $FRONTEND_PID) on $FRONTEND_HOST:$FRONTEND_PORT"
 
 wait

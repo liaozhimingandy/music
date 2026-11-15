@@ -2,7 +2,7 @@
 #
 # 常用命令（在仓库根执行）：
 #   uv sync --project backend                  # 创建/更新 backend/.venv
-#   uv run --project backend uvicorn app.main:app --app-dir backend --port 8788
+#   uv run --project backend python backend/run.py
 #   uv add --project backend <包名>            # 加依赖（会同时更新 uv.lock）
 #   uv lock --project backend                  # 只重算锁文件
 #
